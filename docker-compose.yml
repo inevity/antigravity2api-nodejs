@@ -5,10 +5,17 @@ services:
     build: .
     ports:
       - "8045:8045"
-    env_file:
-      - .env
+    environment:
+      - API_KEY=${API_KEY:-sk-text}
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
+      - JWT_SECRET=${JWT_SECRET:-your-jwt-secret-key-change-this-in-production}
+      - PROXY=${PROXY:-}
+      - SYSTEM_INSTRUCTION=${SYSTEM_INSTRUCTION:-}
+      - IMAGE_BASE_URL=${IMAGE_BASE_URL:-}
     volumes:
       - ./data:/app/data
       - ./public/images:/app/public/images
       - ./.env:/app/.env
+      - ./config.json:/app/config.json
     restart: unless-stopped

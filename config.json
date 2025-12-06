@@ -1,0 +1,18 @@
+{
+  "server": {
+    "port": 8045,
+    "host": "0.0.0.0",
+    "maxRequestSize": "500mb"
+  },
+  "api": {},
+  "defaults": {
+    "temperature": 1,
+    "topP": 0.85,
+    "topK": 50,
+    "maxTokens": 8096
+  },
+  "other": {
+    "timeout": 180000,
+    "skipProjectIdFetch": true
+  }
+}

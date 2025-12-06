@@ -425,10 +425,32 @@ async function loadConfig() {
         const data = await response.json();
         if (data.success) {
             const form = document.getElementById('configForm');
-            Object.entries(data.data).forEach(([key, value]) => {
+            const { env, json } = data.data;
+            
+            // 加载 .env 配置
+            Object.entries(env).forEach(([key, value]) => {
                 const input = form.elements[key];
                 if (input) input.value = value || '';
             });
+            
+            // 加载 config.json 配置
+            if (json.server) {
+                if (form.elements['PORT']) form.elements['PORT'].value = json.server.port || '';
+                if (form.elements['HOST']) form.elements['HOST'].value = json.server.host || '';
+                if (form.elements['MAX_REQUEST_SIZE']) form.elements['MAX_REQUEST_SIZE'].value = json.server.maxRequestSize || '';
+            }
+            if (json.defaults) {
+                if (form.elements['DEFAULT_TEMPERATURE']) form.elements['DEFAULT_TEMPERATURE'].value = json.defaults.temperature ?? '';
+                if (form.elements['DEFAULT_TOP_P']) form.elements['DEFAULT_TOP_P'].value = json.defaults.topP ?? '';
+                if (form.elements['DEFAULT_TOP_K']) form.elements['DEFAULT_TOP_K'].value = json.defaults.topK ?? '';
+                if (form.elements['DEFAULT_MAX_TOKENS']) form.elements['DEFAULT_MAX_TOKENS'].value = json.defaults.maxTokens ?? '';
+            }
+            if (json.other) {
+                if (form.elements['TIMEOUT']) form.elements['TIMEOUT'].value = json.other.timeout ?? '';
+                if (form.elements['MAX_IMAGES']) form.elements['MAX_IMAGES'].value = json.other.maxImages ?? '';
+                if (form.elements['USE_NATIVE_AXIOS']) form.elements['USE_NATIVE_AXIOS'].value = json.other.useNativeAxios ? 'true' : 'false';
+                if (form.elements['SKIP_PROJECT_ID_FETCH']) form.elements['SKIP_PROJECT_ID_FETCH'].value = json.other.skipProjectIdFetch ? 'true' : 'false';
+            }
         }
     } catch (error) {
         showToast('加载配置失败: ' + error.message, 'error');
@@ -438,7 +460,42 @@ async function loadConfig() {
 document.getElementById('configForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     const formData = new FormData(e.target);
-    const config = Object.fromEntries(formData);
+    const allConfig = Object.fromEntries(formData);
+    
+    // 分离敏感和非敏感配置
+    const sensitiveKeys = ['API_KEY', 'ADMIN_USERNAME', 'ADMIN_PASSWORD', 'JWT_SECRET', 'PROXY', 'SYSTEM_INSTRUCTION', 'IMAGE_BASE_URL'];
+    const envConfig = {};
+    const jsonConfig = {
+        server: {},
+        api: {},
+        defaults: {},
+        other: {}
+    };
+    
+    Object.entries(allConfig).forEach(([key, value]) => {
+        if (sensitiveKeys.includes(key)) {
+            envConfig[key] = value;
+        } else {
+            // 映射到 config.json 结构
+            if (key === 'PORT') jsonConfig.server.port = parseInt(value);
+            else if (key === 'HOST') jsonConfig.server.host = value;
+            else if (key === 'MAX_REQUEST_SIZE') jsonConfig.server.maxRequestSize = value;
+            else if (key === 'API_URL') jsonConfig.api.url = value;
+            else if (key === 'API_MODELS_URL') jsonConfig.api.modelsUrl = value;
+            else if (key === 'API_NO_STREAM_URL') jsonConfig.api.noStreamUrl = value;
+            else if (key === 'API_HOST') jsonConfig.api.host = value;
+            else if (key === 'API_USER_AGENT') jsonConfig.api.userAgent = value;
+            else if (key === 'DEFAULT_TEMPERATURE') jsonConfig.defaults.temperature = parseFloat(value);
+            else if (key === 'DEFAULT_TOP_P') jsonConfig.defaults.topP = parseFloat(value);
+            else if (key === 'DEFAULT_TOP_K') jsonConfig.defaults.topK = parseInt(value);
+            else if (key === 'DEFAULT_MAX_TOKENS') jsonConfig.defaults.maxTokens = parseInt(value);
+            else if (key === 'USE_NATIVE_AXIOS') jsonConfig.other.useNativeAxios = value !== 'false';
+            else if (key === 'TIMEOUT') jsonConfig.other.timeout = parseInt(value);
+            else if (key === 'MAX_IMAGES') jsonConfig.other.maxImages = parseInt(value);
+            else if (key === 'SKIP_PROJECT_ID_FETCH') jsonConfig.other.skipProjectIdFetch = value === 'true';
+            else envConfig[key] = value;
+        }
+    });
     
     showLoading('正在保存配置...');
     try {
@@ -448,7 +505,7 @@ document.getElementById('configForm').addEventListener('submit', async (e) => {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${authToken}`
             },
-            body: JSON.stringify(config)
+            body: JSON.stringify({ env: envConfig, json: jsonConfig })
         });
         
         const data = await response.json();

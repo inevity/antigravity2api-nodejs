@@ -1,75 +1,54 @@
 import dotenv from 'dotenv';
 import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import log from '../utils/logger.js';
 
-const envPath = '.env';
-const defaultEnv = `# 服务器配置
-PORT=8045
-HOST=0.0.0.0
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const envPath = path.join(__dirname, '../../.env');
+const configJsonPath = path.join(__dirname, '../../config.json');
 
-# API 配置
-API_URL=https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:streamGenerateContent?alt=sse
-API_MODELS_URL=https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:fetchAvailableModels
-API_NO_STREAM_URL=https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:generateContent
-API_HOST=daily-cloudcode-pa.sandbox.googleapis.com
-API_USER_AGENT=antigravity/1.11.3 windows/amd64
-
-# 默认参数
-DEFAULT_TEMPERATURE=1
-DEFAULT_TOP_P=0.85
-DEFAULT_TOP_K=50
-DEFAULT_MAX_TOKENS=8096
-
-# 安全配置
-MAX_REQUEST_SIZE=50mb
-API_KEY=sk-text
-
-# 管理员认证
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD=admin123
-JWT_SECRET=your-jwt-secret-key-change-this-in-production
-
-# 其他配置
-USE_NATIVE_AXIOS=false
-TIMEOUT=180000
-# PROXY=http://127.0.0.1:7897
-MAX_IMAGES=10 # 最多保存的图片个数，超过就会删除时间最旧的
-# IMAGE_BASE_URL=http://your-domain.com  # 可选：自定义图片访问基础 URL，默认使用 局域网ip或者本地回环
-
-
-# 系统提示词
-SYSTEM_INSTRUCTION=你是聊天机器人，名字叫萌萌，如同名字这般，你的性格是软软糯糯萌萌哒的，专门为用户提供聊天和情绪价值，协助进行小说创作或者角色扮演
-`;
-
+// 确保 .env 存在
 if (!fs.existsSync(envPath)) {
-  fs.writeFileSync(envPath, defaultEnv, 'utf8');
-  log.info('✓ 已创建默认 .env 文件');
+  const examplePath = path.join(__dirname, '../../.env.example');
+  if (fs.existsSync(examplePath)) {
+    fs.copyFileSync(examplePath, envPath);
+    log.info('✓ 已从 .env.example 创建 .env 文件');
+  }
 }
 
+// 加载 config.json
+let jsonConfig = {};
+if (fs.existsSync(configJsonPath)) {
+  jsonConfig = JSON.parse(fs.readFileSync(configJsonPath, 'utf8'));
+}
+
+// 加载 .env
 dotenv.config();
 
 const config = {
   server: {
-    port: parseInt(process.env.PORT) || 8045,
-    host: process.env.HOST || '127.0.0.1'
+    port: jsonConfig.server?.port || 8045,
+    host: jsonConfig.server?.host || '0.0.0.0'
   },
   imageBaseUrl: process.env.IMAGE_BASE_URL || null,
-  maxImages: parseInt(process.env.MAX_IMAGES) || 10,
+  maxImages: jsonConfig.other?.maxImages || 10,
   api: {
-    url: process.env.API_URL || 'https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:streamGenerateContent?alt=sse',
-    modelsUrl: process.env.API_MODELS_URL || 'https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:fetchAvailableModels',
-    noStreamUrl: process.env.API_NO_STREAM_URL || 'https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:generateContent',
-    host: process.env.API_HOST || 'daily-cloudcode-pa.sandbox.googleapis.com',
-    userAgent: process.env.API_USER_AGENT || 'antigravity/1.11.3 windows/amd64'
+    url: jsonConfig.api?.url || 'https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:streamGenerateContent?alt=sse',
+    modelsUrl: jsonConfig.api?.modelsUrl || 'https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:fetchAvailableModels',
+    noStreamUrl: jsonConfig.api?.noStreamUrl || 'https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:generateContent',
+    host: jsonConfig.api?.host || 'daily-cloudcode-pa.sandbox.googleapis.com',
+    userAgent: jsonConfig.api?.userAgent || 'antigravity/1.11.3 windows/amd64'
   },
   defaults: {
-    temperature: parseFloat(process.env.DEFAULT_TEMPERATURE) || 1,
-    top_p: parseFloat(process.env.DEFAULT_TOP_P) || 0.85,
-    top_k: parseInt(process.env.DEFAULT_TOP_K) || 50,
-    max_tokens: parseInt(process.env.DEFAULT_MAX_TOKENS) || 8096
+    temperature: jsonConfig.defaults?.temperature || 1,
+    top_p: jsonConfig.defaults?.topP || 0.85,
+    top_k: jsonConfig.defaults?.topK || 50,
+    max_tokens: jsonConfig.defaults?.maxTokens || 8096
   },
   security: {
-    maxRequestSize: process.env.MAX_REQUEST_SIZE || '50mb',
+    maxRequestSize: jsonConfig.server?.maxRequestSize || '50mb',
     apiKey: process.env.API_KEY || null
   },
   admin: {
@@ -77,13 +56,24 @@ const config = {
     password: process.env.ADMIN_PASSWORD || 'admin123',
     jwtSecret: process.env.JWT_SECRET || 'your-jwt-secret-key-change-this-in-production'
   },
-  useNativeAxios: process.env.USE_NATIVE_AXIOS !== 'false',
-  timeout: parseInt(process.env.TIMEOUT) || 30000,
+  useNativeAxios: jsonConfig.other?.useNativeAxios !== false,
+  timeout: jsonConfig.other?.timeout || 180000,
   proxy: process.env.PROXY || null,
-  systemInstruction: process.env.SYSTEM_INSTRUCTION || '你是聊天机器人，名字叫萌萌，如同名字这般，你的性格是软软糯糯萌萌哒的，专门为用户提供聊天和情绪价值，协助进行小说创作或者角色扮演',
-  skipProjectIdFetch: process.env.SKIP_PROJECT_ID_FETCH === 'true'
+  systemInstruction: process.env.SYSTEM_INSTRUCTION || '',
+  skipProjectIdFetch: jsonConfig.other?.skipProjectIdFetch === true
 };
 
 log.info('✓ 配置加载成功');
 
 export default config;
+
+export function getConfigJson() {
+  if (fs.existsSync(configJsonPath)) {
+    return JSON.parse(fs.readFileSync(configJsonPath, 'utf8'));
+  }
+  return {};
+}
+
+export function saveConfigJson(data) {
+  fs.writeFileSync(configJsonPath, JSON.stringify(data, null, 2), 'utf8');
+}

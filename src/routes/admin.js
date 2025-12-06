@@ -1,7 +1,7 @@
 import express from 'express';
 import { generateToken, authMiddleware } from '../auth/jwt.js';
 import tokenManager from '../auth/token_manager.js';
-import config from '../config/config.js';
+import config, { getConfigJson, saveConfigJson } from '../config/config.js';
 import logger from '../utils/logger.js';
 import { generateProjectId } from '../utils/idGenerator.js';
 import axios from 'axios';
@@ -13,6 +13,7 @@ import dotenv from 'dotenv';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const envPath = path.join(__dirname, '../../.env');
+const configJsonPath = path.join(__dirname, '../../config.json');
 
 const router = express.Router();
 
@@ -154,16 +155,18 @@ router.post('/oauth/exchange', authMiddleware, async (req, res) => {
 // 获取配置
 router.get('/config', authMiddleware, (req, res) => {
   try {
+    const envData = {};
     const envContent = fs.readFileSync(envPath, 'utf8');
-    const configData = {};
     envContent.split('\n').forEach(line => {
       line = line.trim();
       if (line && !line.startsWith('#')) {
         const [key, ...valueParts] = line.split('=');
-        if (key) configData[key.trim()] = valueParts.join('=').trim();
+        if (key) envData[key.trim()] = valueParts.join('=').trim();
       }
     });
-    res.json({ success: true, data: configData });
+    
+    const jsonData = getConfigJson();
+    res.json({ success: true, data: { env: envData, json: jsonData } });
   } catch (error) {
     logger.error('读取配置失败:', error.message);
     res.status(500).json({ success: false, message: error.message });
@@ -173,35 +176,50 @@ router.get('/config', authMiddleware, (req, res) => {
 // 更新配置
 router.put('/config', authMiddleware, (req, res) => {
   try {
-    const updates = req.body;
-    let envContent = fs.readFileSync(envPath, 'utf8');
+    const { env: envUpdates, json: jsonUpdates } = req.body;
     
-    Object.entries(updates).forEach(([key, value]) => {
-      const regex = new RegExp(`^${key}=.*$`, 'm');
-      if (regex.test(envContent)) {
-        envContent = envContent.replace(regex, `${key}=${value}`);
-      } else {
-        envContent += `\n${key}=${value}`;
-      }
-    });
+    // 更新 .env（只保留敏感信息）
+    if (envUpdates) {
+      let envContent = fs.readFileSync(envPath, 'utf8');
+      Object.entries(envUpdates).forEach(([key, value]) => {
+        const regex = new RegExp(`^${key}=.*$`, 'm');
+        if (regex.test(envContent)) {
+          envContent = envContent.replace(regex, `${key}=${value}`);
+        } else {
+          envContent += `\n${key}=${value}`;
+        }
+      });
+      fs.writeFileSync(envPath, envContent, 'utf8');
+    }
     
-    fs.writeFileSync(envPath, envContent, 'utf8');
+    // 更新 config.json
+    if (jsonUpdates) {
+      saveConfigJson(jsonUpdates);
+    }
     
     // 重新加载环境变量
     dotenv.config({ override: true });
     
     // 更新config对象
-    config.server.port = parseInt(process.env.PORT) || 8045;
-    config.server.host = process.env.HOST || '127.0.0.1';
-    config.defaults.temperature = parseFloat(process.env.DEFAULT_TEMPERATURE) || 1;
-    config.defaults.top_p = parseFloat(process.env.DEFAULT_TOP_P) || 0.85;
-    config.defaults.top_k = parseInt(process.env.DEFAULT_TOP_K) || 50;
-    config.defaults.max_tokens = parseInt(process.env.DEFAULT_MAX_TOKENS) || 8096;
+    const jsonConfig = getConfigJson();
+    config.server.port = jsonConfig.server?.port || 8045;
+    config.server.host = jsonConfig.server?.host || '0.0.0.0';
+    config.defaults.temperature = jsonConfig.defaults?.temperature || 1;
+    config.defaults.top_p = jsonConfig.defaults?.topP || 0.85;
+    config.defaults.top_k = jsonConfig.defaults?.topK || 50;
+    config.defaults.max_tokens = jsonConfig.defaults?.maxTokens || 8096;
     config.security.apiKey = process.env.API_KEY || null;
-    config.timeout = parseInt(process.env.TIMEOUT) || 30000;
+    config.timeout = jsonConfig.other?.timeout || 180000;
     config.proxy = process.env.PROXY || null;
     config.systemInstruction = process.env.SYSTEM_INSTRUCTION || '';
-    config.skipProjectIdFetch = process.env.SKIP_PROJECT_ID_FETCH === 'true';
+    config.skipProjectIdFetch = jsonConfig.other?.skipProjectIdFetch === true;
+    config.maxImages = jsonConfig.other?.maxImages || 10;
+    config.useNativeAxios = jsonConfig.other?.useNativeAxios !== false;
+    config.api.url = jsonConfig.api?.url || 'https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:streamGenerateContent?alt=sse';
+    config.api.modelsUrl = jsonConfig.api?.modelsUrl || 'https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:fetchAvailableModels';
+    config.api.noStreamUrl = jsonConfig.api?.noStreamUrl || 'https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:generateContent';
+    config.api.host = jsonConfig.api?.host || 'daily-cloudcode-pa.sandbox.googleapis.com';
+    config.api.userAgent = jsonConfig.api?.userAgent || 'antigravity/1.11.3 windows/amd64';
     
     logger.info('配置已更新并热重载');
     res.json({ success: true, message: '配置已保存并生效（端口/HOST修改需重启）' });

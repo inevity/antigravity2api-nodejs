@@ -17,7 +17,19 @@ class TokenManager {
     this.filePath = filePath;
     this.tokens = [];
     this.currentIndex = 0;
+    this.ensureFileExists();
     this.initialize();
+  }
+
+  ensureFileExists() {
+    const dir = path.dirname(this.filePath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    if (!fs.existsSync(this.filePath)) {
+      fs.writeFileSync(this.filePath, '[]', 'utf8');
+      log.info('✓ 已创建账号配置文件');
+    }
   }
 
   async initialize() {
@@ -32,7 +44,13 @@ class TokenManager {
       }));
       
       this.currentIndex = 0;
-      log.info(`成功加载 ${this.tokens.length} 个可用token`);
+      if (this.tokens.length === 0) {
+        log.warn('⚠ 暂无可用账号，请使用以下方式添加：');
+        log.warn('  方式1: 运行 npm run login 命令登录');
+        log.warn('  方式2: 访问前端管理页面添加账号');
+      } else {
+        log.info(`成功加载 ${this.tokens.length} 个可用token`);
+      }
     } catch (error) {
       log.error('初始化token失败:', error.message);
       this.tokens = [];
@@ -198,6 +216,7 @@ class TokenManager {
 
   addToken(tokenData) {
     try {
+      this.ensureFileExists();
       const data = fs.readFileSync(this.filePath, 'utf8');
       const allTokens = JSON.parse(data);
       
@@ -226,6 +245,7 @@ class TokenManager {
 
   updateToken(refreshToken, updates) {
     try {
+      this.ensureFileExists();
       const data = fs.readFileSync(this.filePath, 'utf8');
       const allTokens = JSON.parse(data);
       
@@ -247,6 +267,7 @@ class TokenManager {
 
   deleteToken(refreshToken) {
     try {
+      this.ensureFileExists();
       const data = fs.readFileSync(this.filePath, 'utf8');
       const allTokens = JSON.parse(data);
       
@@ -267,6 +288,7 @@ class TokenManager {
 
   getTokenList() {
     try {
+      this.ensureFileExists();
       const data = fs.readFileSync(this.filePath, 'utf8');
       const allTokens = JSON.parse(data);
       
