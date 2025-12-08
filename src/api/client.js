@@ -4,6 +4,7 @@ import config from '../config/config.js';
 import { generateToolCallId } from '../utils/idGenerator.js';
 import AntigravityRequester from '../AntigravityRequester.js';
 import { saveBase64Image } from '../utils/imageStorage.js';
+import { buildAxiosProxyOptions } from '../utils/proxy.js';
 
 // 请求客户端：优先使用 AntigravityRequester，失败则降级到 axios
 let requester = null;
@@ -18,6 +19,11 @@ if (config.useNativeAxios === true) {
     console.warn('AntigravityRequester 初始化失败，降级使用 axios:', error.message);
     useAxios = true;
   }
+}
+
+// AntigravityRequester 目前不支持 SOCKS 代理，遇到 SOCKS 时强制使用 axios
+if (config.proxy?.startsWith('socks')) {
+  useAxios = true;
 }
 
 // ==================== 辅助函数 ====================
@@ -38,10 +44,7 @@ function buildAxiosConfig(url, headers, body = null) {
     url,
     headers,
     timeout: config.timeout,
-    proxy: config.proxy ? (() => {
-      const proxyUrl = new URL(config.proxy);
-      return { protocol: proxyUrl.protocol.replace(':', ''), host: proxyUrl.hostname, port: parseInt(proxyUrl.port) };
-    })() : false
+    ...buildAxiosProxyOptions(config.proxy)
   };
   if (body !== null) axiosConfig.data = body;
   return axiosConfig;
