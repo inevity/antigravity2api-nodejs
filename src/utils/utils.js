@@ -76,7 +76,7 @@ function handleAssistantMessage(message, antigravityMessages){
   
   const antigravityTools = hasToolCalls ? message.tool_calls.map((toolCall, idx) => {
     // Store mapping for later response matching (NOT in part object)
-    if (toolCall.id) {
+    const toolCallId = toolCall.id || `call_${simpleHash(toolCall.function.name + (toolCall.function.arguments || ''))}`;
       toolCallIdToName.set(toolCall.id, toolCall.function.name);
     }
     const part = {
