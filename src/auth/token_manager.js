@@ -260,7 +260,7 @@ class TokenManager {
         return { success: false, message: 'Token不存在' };
       }
       
-      allTokens[index] = { ...allTokens[index], ...updates };
+      const { access_token_suffix, ...cleanUpdates } = updates; allTokens[index] = { ...allTokens[index], ...cleanUpdates };
       fs.writeFileSync(this.filePath, JSON.stringify(allTokens, null, 2), 'utf8');
       
       this.reload();

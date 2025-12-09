@@ -5,6 +5,19 @@ import { generateToolCallId } from '../utils/idGenerator.js';
 import AntigravityRequester from '../AntigravityRequester.js';
 import { saveBase64Image } from '../utils/imageStorage.js';
 import { buildAxiosProxyOptions } from '../utils/proxy.js';
+import log from '../utils/logger.js';
+
+
+// Simple hash for correlation logging
+function simpleHash(str) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash;
+  }
+  return Math.abs(hash).toString(16).substring(0, 8);
+}
 
 // 请求客户端：优先使用 AntigravityRequester，失败则降级到 axios
 let requester = null;
@@ -62,9 +75,11 @@ function buildRequesterConfig(headers, body = null) {
 }
 
 // 统一错误处理
-async function handleApiError(error, token) {
+async function handleApiError(error, token, requestBody = null) {
   const status = error.response?.status || error.status || 'Unknown';
   let errorBody = error.message;
+  if (requestBody) { try { log.error('[API Error] Request Body:', JSON.stringify(requestBody, null, 2)); } catch (e) { log.error('[API Error] Failed to stringify request body'); } }
+      if (requestBody.request?.contents) { log.error('--- Request Content Indices ---'); requestBody.request.contents.forEach((msg, idx) => { const types = msg.parts?.map(p => { if (p.functionCall) return `ToolCall:${p.functionCall.name}`; if (p.functionResponse) return `ToolResp:${p.functionResponse.name}`; return 'Text'; }).join(', ') || 'Empty'; log.error(`[Index ${idx}] ${msg.role}: ${types.substring(0, 100)}`); }); log.error('-------------------------------'); }
   
   if (error.response?.data?.readable) {
     const chunks = [];
@@ -122,10 +137,30 @@ function parseAndEmitStreamChunk(line, state, callback) {
             callback({ type: 'thinking', content: '\n</think>\n' });
             state.thinkingStarted = false;
           }
-          callback({ type: 'text', content: part.text });
+          // Capture text part signature if present (optional but recommended)
+          const textSig = part.thoughtSignature || part.thought_signature;
+          if (textSig) {
+            log.info(`[SIG-TRACE] TEXT SIGNATURE from Gemini: ${textSig.substring(0, 20)}...`);
+            // Store for potential use - attach to state for downstream
+            state.lastTextSignature = textSig;
+          }
+          callback({ type: 'text', content: part.text, thought_signature: textSig });
         } else if (part.functionCall) {
           // 工具调用
-          state.toolCalls.push(convertToToolCall(part.functionCall));
+          const tc = convertToToolCall(part.functionCall);
+          // 尝试捕获 thoughtSignature (camelCase 或 snake_case) 并传递给下游
+          if (part.thoughtSignature) {
+            tc.function.thought_signature = part.thoughtSignature;
+            const callHash = simpleHash(tc.function.name + tc.function.arguments);
+            log.info(`[TOOL-IN] hash=${callHash} name=${tc.function.name} hasSig=true sig=${part.thoughtSignature.substring(0, 10)}...`);
+          } else if (part.thought_signature) {
+            tc.function.thought_signature = part.thought_signature;
+            log.info(`[SIG-TRACE] RECEIVED from Gemini: toolCallId=${tc.id}, signature=${part.thought_signature.substring(0, 20)}...`);
+          } else {
+            const callHashNoSig = simpleHash(tc.function.name + tc.function.arguments);
+            log.info(`[TOOL-IN] hash=${callHashNoSig} name=${tc.function.name} hasSig=false (parallel call)`);
+          }
+          state.toolCalls.push(tc);
         }
       }
     }
@@ -184,7 +219,7 @@ export async function generateAssistantResponse(requestBody, token, callback) {
         response.data.on('error', reject);
       });
     } catch (error) {
-      await handleApiError(error, token);
+      await handleApiError(error, token, requestBody);
     }
   } else {
     try {
@@ -200,7 +235,7 @@ export async function generateAssistantResponse(requestBody, token, callback) {
           .onError(reject);
       });
     } catch (error) {
-      await handleApiError(error, token);
+      await handleApiError(error, token, requestBody);
     }
   }
 }
@@ -242,7 +277,7 @@ export async function getAvailableModels() {
       data: modelList
     };
   } catch (error) {
-    await handleApiError(error, token);
+    await handleApiError(error, token, requestBody);
   }
 }
 
@@ -274,7 +309,7 @@ export async function getModelsWithQuotas(token) {
     
     return quotas;
   } catch (error) {
-    await handleApiError(error, token);
+    await handleApiError(error, token, requestBody);
   }
 }
 
@@ -295,7 +330,7 @@ export async function generateAssistantResponseNoStream(requestBody, token) {
       data = await response.json();
     }
   } catch (error) {
-    await handleApiError(error, token);
+    await handleApiError(error, token, requestBody);
   }
   //console.log(JSON.stringify(data));
   // 解析响应内容
@@ -311,7 +346,13 @@ export async function generateAssistantResponseNoStream(requestBody, token) {
     } else if (part.text !== undefined) {
       content += part.text;
     } else if (part.functionCall) {
-      toolCalls.push(convertToToolCall(part.functionCall));
+      const tc = convertToToolCall(part.functionCall);
+      if (part.thoughtSignature) {
+        tc.function.thought_signature = part.thoughtSignature;
+      } else if (part.thought_signature) {
+        tc.function.thought_signature = part.thought_signature;
+      }
+      toolCalls.push(tc);
     } else if (part.inlineData) {
       // 保存图片到本地并获取 URL
       const imageUrl = saveBase64Image(part.inlineData.data, part.inlineData.mimeType);

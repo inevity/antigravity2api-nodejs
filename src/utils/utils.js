@@ -1,7 +1,23 @@
+import log from './logger.js';
 import config from '../config/config.js';
 import tokenManager from '../auth/token_manager.js';
 import { generateRequestId } from './idGenerator.js';
 import os from 'os';
+
+
+// Simple hash for correlation logging
+function simpleHash(str) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32bit integer
+  }
+  return Math.abs(hash).toString(16).substring(0, 8);
+}
+
+// Module-level map to track toolCallId -> functionName for matching responses
+const toolCallIdToName = new Map();
 
 function extractImagesFromContent(content) {
   const result = { text: '', images: [] };
@@ -55,15 +71,31 @@ function handleAssistantMessage(message, antigravityMessages){
   const hasToolCalls = message.tool_calls && message.tool_calls.length > 0;
   const hasContent = message.content && message.content.trim() !== '';
   
-  const antigravityTools = hasToolCalls ? message.tool_calls.map(toolCall => ({
-    functionCall: {
-      id: toolCall.id,
-      name: toolCall.function.name,
-      args: {
-        query: toolCall.function.arguments
-      }
+  // Get the signature from the FIRST tool call (if any) to share with all parallel calls
+  const firstSignature = hasToolCalls && message.tool_calls[0]?.function?.thought_signature;
+  
+  const antigravityTools = hasToolCalls ? message.tool_calls.map((toolCall, idx) => {
+    // Store mapping for later response matching (NOT in part object)
+    if (toolCall.id) {
+      toolCallIdToName.set(toolCall.id, toolCall.function.name);
     }
-  })) : [];
+    const part = {
+      functionCall: {
+        name: toolCall.function.name,
+        args: JSON.parse(toolCall.function.arguments || '{}')
+      }
+    };
+    // Apply thoughtSignature to ALL parallel function calls in the turn
+    // Use the signature from the first call (Gemini only provides it on first)
+    // Or use individual signature if available
+    const sig = toolCall.function.thought_signature || firstSignature;
+    if (sig) {
+      part.thoughtSignature = sig;
+    }
+    const callHash = simpleHash(toolCall.function.name + (toolCall.function.arguments || ''));
+    log.debug(`[DEBUG] hash=${callHash} Generated Antigravity Tool Part:`, JSON.stringify(part, null, 2));
+    return part;
+  }) : [];
   
   if (lastMessage?.role === "model" && hasToolCalls && !hasContent){
     lastMessage.parts.push(...antigravityTools)
@@ -79,25 +111,29 @@ function handleAssistantMessage(message, antigravityMessages){
   }
 }
 function handleToolCall(message, antigravityMessages){
-  // 从之前的 model 消息中找到对应的 functionCall name
-  let functionName = '';
-  for (let i = antigravityMessages.length - 1; i >= 0; i--) {
-    if (antigravityMessages[i].role === 'model') {
-      const parts = antigravityMessages[i].parts;
-      for (const part of parts) {
-        if (part.functionCall && part.functionCall.id === message.tool_call_id) {
-          functionName = part.functionCall.name;
-          break;
+  // Look up function name from our Map
+  let functionName = toolCallIdToName.get(message.tool_call_id) || '';
+  
+  // Fallback: search in previous model messages if not in Map
+  if (!functionName) {
+    for (let i = antigravityMessages.length - 1; i >= 0; i--) {
+      if (antigravityMessages[i].role === 'model') {
+        const parts = antigravityMessages[i].parts;
+        for (const part of parts) {
+          if (part.functionCall) {
+            // This is a fallback - may not be accurate for multiple calls
+            functionName = part.functionCall.name;
+            break;
+          }
         }
+        if (functionName) break;
       }
-      if (functionName) break;
     }
   }
   
   const lastMessage = antigravityMessages[antigravityMessages.length - 1];
   const functionResponse = {
     functionResponse: {
-      id: message.tool_call_id,
       name: functionName,
       response: {
         output: message.content
