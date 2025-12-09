@@ -93,7 +93,7 @@ function handleAssistantMessage(message, antigravityMessages){
       part.thoughtSignature = sig;
     }
     const callHash = simpleHash(toolCall.function.name + (toolCall.function.arguments || ''));
-    log.debug(`[DEBUG] hash=${callHash} Generated Antigravity Tool Part:`, JSON.stringify(part, null, 2));
+    log.debug(`[DEBUG] hash=${callHash} id=${toolCall.id || 'N/A'} Generated Antigravity Tool Part:`, JSON.stringify(part, null, 2));
     return part;
   }) : [];
   
