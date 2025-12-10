@@ -13,7 +13,8 @@ class AntiPayloadFixer {
   }
 
   // Generate a unique cache key for a specific function call based on name + args
-  generateCallKey(functionName, args) {
+  generateCallKey(functionName, args, id = null) {
+    if (id) return `id:${id}`;
     if (!functionName) return null;
     const argsStr = typeof args === 'string' ? args : JSON.stringify(args || {});
     // Simple hash: use first 16 chars of base64 encoded string
@@ -26,7 +27,7 @@ class AntiPayloadFixer {
   generateCallKeyFromToolCall(tc) {
     const name = tc.function?.name || tc.name;
     const args = tc.function?.arguments || tc.args;
-    return this.generateCallKey(name, args);
+    return this.generateCallKey(name, args, tc.id);
   }
 
   transformRequestIn(request, provider) {
@@ -149,7 +150,7 @@ class AntiPayloadFixer {
       newReq.messages.forEach((m, i) => {
         if (m.tool_calls) {
           m.tool_calls.forEach((tc, j) => {
-            this.log(`[AntiPayloadFixer] OUTGOING MSG[${i}] TOOL_CALL[${j}] thought_signature:`, tc.function?.thought_signature);
+            this.log(`[AntiPayloadFixer] OUTGOING MSG[${i}] TOOL_CALL[${j}] id: ${tc.id} thought_signature:`, tc.function?.thought_signature);
           });
         }
       });
@@ -158,27 +159,86 @@ class AntiPayloadFixer {
     return newReq;
   }
 
-  transformResponseOut(response) {
-    this.log('[AntiPayloadFixer] transformResponseOut CALLED');
-    // We need to intercept the stream to capture thought_signatures from tool calls.
+  async transformResponseOut(response) {
+    this.log('[AntiPayloadFixer] transformResponseOut START');
     const contentType = response.headers.get("content-type") || "";
     const isEventStream = contentType.includes("text/event-stream");
+    this.log('[AntiPayloadFixer] contentType:', contentType, 'isEventStream:', isEventStream, 'hasBody:', !!response.body);
 
-    // Only intercept streaming responses
+    // For streaming responses, buffer and re-emit to fix compatibility issues
     if (response.body && isEventStream) {
-      const [spyStream, returnStream] = response.body.tee();
+      this.log('[AntiPayloadFixer] Starting to read stream...');
+      const reader = response.body.getReader();
+      const chunks = [];
 
-      // Process spyStream asynchronously to capture signatures
-      this.captureSignaturesFromStream(spyStream);
+      // Read all chunks
+      let chunkCount = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          this.log('[AntiPayloadFixer] Stream reading DONE, total chunks:', chunkCount);
+          break;
+        }
+        chunkCount++;
+        chunks.push(value);
+        this.log('[AntiPayloadFixer] Read chunk', chunkCount, 'size:', value?.length);
 
-      return new Response(returnStream, {
+        // Also capture signatures from tool calls
+        this.processChunkForSignatures(value);
+      }
+
+      this.log('[AntiPayloadFixer] Creating new ReadableStream with', chunks.length, 'chunks');
+      // Create a new ReadableStream from buffered chunks using pull-based approach
+      let chunkIndex = 0;
+      const newStream = new ReadableStream({
+        pull(controller) {
+          if (chunkIndex < chunks.length) {
+            controller.enqueue(chunks[chunkIndex]);
+            chunkIndex++;
+          } else {
+            controller.close();
+          }
+        }
+      });
+
+      this.log('[AntiPayloadFixer] Returning new Response');
+      return new Response(newStream, {
         status: response.status,
         statusText: response.statusText,
         headers: response.headers
       });
     }
 
+    this.log('[AntiPayloadFixer] Returning original response (non-stream)');
     return response;
+  }
+
+  processChunkForSignatures(chunk) {
+    try {
+      const text = new TextDecoder().decode(chunk);
+      const lines = text.split('\n');
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const data = line.slice(6).trim();
+          if (data === '[DONE]') continue;
+          try {
+            const parsed = JSON.parse(data);
+            if (parsed.choices?.[0]?.delta?.tool_calls) {
+              const toolCalls = parsed.choices[0].delta.tool_calls;
+              toolCalls.forEach(tc => {
+                if (tc.function && (tc.function.thought_signature || tc.function.thoughtSignature)) {
+                  const sig = tc.function.thought_signature || tc.function.thoughtSignature;
+                  const callKey = this.generateCallKeyFromStreamCall(tc);
+                  if (callKey) {
+                    this.signatureCache.set(callKey, { signature: sig, timestamp: Date.now() });
+                  }
+                }
+              });
+            }
+          } catch (e) { /* ignore */ }
+        }
+      }
+    } catch (e) { /* ignore */ }
   }
 
   async captureSignaturesFromStream(stream) {
@@ -240,7 +300,7 @@ class AntiPayloadFixer {
   generateCallKeyFromStreamCall(tc) {
     const name = tc.function?.name || tc.name;
     const args = tc.function?.arguments || tc.args;
-    return this.generateCallKey(name, args);
+    return this.generateCallKey(name, args, tc.id);
   }
 }
 
