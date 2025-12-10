@@ -1,10 +1,11 @@
-# ADD and FIX
+# ADD and FIX  
+
 添加功能
-socks5支持
-log level 调试
-ccr配置，支持gemini和cluade模型,只测试了思考模型。
-fix gemini-3-pro-high等模型的小bug
-src/anti-fixer.js 是ccr需要的插件.
+* socks5支持
+* log level 调试
+* ccr配置，支持gemini和cluade模型,只测试了思考模型。
+* fix gemini-3-pro-high等模型的小bug
+* src/anti-fixer.js 是ccr需要的插件.
 
 # Antigravity to OpenAI API 代理服务
 
