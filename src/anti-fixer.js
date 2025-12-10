@@ -75,6 +75,36 @@ class AntiPayloadFixer {
           }
         }
       });
+
+      // Strip cache_control from message.content (array of parts) to avoid upstream API rejection
+      newReq.messages.forEach((m, i) => {
+        // Strip from message.thinking directly (OpenAI format)
+        if (m.thinking && m.thinking.cache_control !== undefined) {
+          this.log(`[AntiPayloadFixer] Stripping cache_control from MSG[${i}] message.thinking`);
+          delete m.thinking.cache_control;
+        }
+
+        // Strip from message-level cache_control
+        if (m.cache_control !== undefined) {
+          this.log(`[AntiPayloadFixer] Stripping cache_control from MSG[${i}] message-level`);
+          delete m.cache_control;
+        }
+
+        if (Array.isArray(m.content)) {
+          m.content.forEach((part, partIdx) => {
+            // Top-level cache_control on content part
+            if (part && part.cache_control !== undefined) {
+              this.log(`[AntiPayloadFixer] Stripping cache_control from MSG[${i}] part[${partIdx}] type=${part.type || 'unknown'}`);
+              delete part.cache_control;
+            }
+            // Nested cache_control inside thinking object (Anthropic format)
+            if (part && part.thinking && part.thinking.cache_control !== undefined) {
+              this.log(`[AntiPayloadFixer] Stripping cache_control from MSG[${i}] part[${partIdx}].thinking`);
+              delete part.thinking.cache_control;
+            }
+          });
+        }
+      });
     }
 
     // ... (rest of logic) ...

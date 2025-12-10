@@ -113,6 +113,43 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
     const isImageModel = model.includes('-image');
     const requestBody = await generateRequestBody(messages, model, params, tools, token);
+
+    // DEBUG: Log request ID and check cache_control in ALL incoming messages
+    logger.info(`[REQ-ID] ${requestBody.requestId}`);
+
+    // Check incoming OpenAI format messages
+    messages.forEach((msg, idx) => {
+      // Check message-level cache_control
+      if (msg.cache_control) {
+        logger.warn(`[INCOMING] MSG[${idx}] role=${msg.role} FOUND cache_control at message level!`);
+      }
+      // Check thinking cache_control
+      if (msg.thinking && msg.thinking.cache_control) {
+        logger.warn(`[INCOMING] MSG[${idx}] role=${msg.role} FOUND cache_control in thinking!`);
+      }
+      // Check content array cache_control
+      if (Array.isArray(msg.content)) {
+        msg.content.forEach((part, pIdx) => {
+          if (part && part.cache_control) {
+            logger.warn(`[INCOMING] MSG[${idx}] content[${pIdx}] FOUND cache_control! type=${part.type}`);
+          }
+        });
+      }
+    });
+
+    // Check outgoing Gemini format to Google endpoint
+    if (requestBody.request?.contents) {
+      requestBody.request.contents.forEach((msg, idx) => {
+        if (msg.parts) {
+          msg.parts.forEach((part, pIdx) => {
+            const keys = Object.keys(part);
+            if (keys.includes('cache_control') || keys.some(k => k.includes('cache'))) {
+              logger.warn(`[OUTGOING] contents[${idx}].parts[${pIdx}] FOUND CACHE-RELATED KEYS:`, keys);
+            }
+          });
+        }
+      });
+    }
     if (isImageModel) {
       requestBody.request.generationConfig = {
         candidateCount: 1,

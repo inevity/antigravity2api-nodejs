@@ -86,11 +86,40 @@ function handleUserMessage(extracted, antigravityMessages) {
     ]
   })
 }
-function handleAssistantMessage(message, antigravityMessages, modelName) {
+function handleAssistantMessage(message, antigravityMessages, modelName, msgIndex) {
   const lastMessage = antigravityMessages[antigravityMessages.length - 1];
   const hasToolCalls = message.tool_calls && message.tool_calls.length > 0;
   const hasThinking = !!message.thinking;
   const hasContent = (message.content && message.content.trim() !== '') || hasThinking;
+
+  // DEBUG: Log full message structure for first assistant message
+  if (msgIndex === 1) {
+    log.warn(`[DEBUG-MSG] MSG[${msgIndex}] FULL STRUCTURE:`, JSON.stringify({
+      keys: Object.keys(message),
+      hasThinking: hasThinking,
+      thinkingKeys: message.thinking ? Object.keys(message.thinking) : null,
+      contentType: typeof message.content,
+      contentIsArray: Array.isArray(message.content),
+      contentSample: Array.isArray(message.content)
+        ? message.content.map(p => ({ type: p.type, keys: Object.keys(p) }))
+        : (typeof message.content === 'string' ? message.content.substring(0, 100) : null)
+    }, null, 2));
+  }
+
+  // DEBUG: Log if any cache_control exists in incoming message
+  if (message.cache_control) {
+    log.warn(`[CACHE_CONTROL] MSG[${msgIndex}] Found cache_control at message level`);
+  }
+  if (message.thinking && message.thinking.cache_control) {
+    log.warn(`[CACHE_CONTROL] MSG[${msgIndex}] Found cache_control in message.thinking`);
+  }
+  if (Array.isArray(message.content)) {
+    message.content.forEach((part, idx) => {
+      if (part && part.cache_control) {
+        log.warn(`[CACHE_CONTROL] MSG[${msgIndex}] Found cache_control in content[${idx}]`);
+      }
+    });
+  }
 
   // Get the signature from the FIRST tool call (if any) to share with all parallel calls
   const firstSignature = hasToolCalls && message.tool_calls[0]?.function?.thought_signature;
@@ -277,7 +306,17 @@ async function openaiMessageToAntigravity(openaiMessages, modelName) {
   for (const message of openaiMessages) {
     if (message.role === "system") {
       if (extractSystem) {
-        systemText += (systemText ? "\n" : "") + message.content;
+        // Handle both string and array content (Anthropic format sends array of parts)
+        let systemContent = '';
+        if (typeof message.content === 'string') {
+          systemContent = message.content;
+        } else if (Array.isArray(message.content)) {
+          systemContent = message.content
+            .filter(part => part && (part.text || part.type === 'text'))
+            .map(part => part.text || '')
+            .join('\n');
+        }
+        systemText += (systemText ? "\n" : "") + systemContent;
       } else {
         // Fallback for non-Claude (Gemini): Treat as user message
         const extracted = await extractImagesFromContent(message.content, modelName);
@@ -287,7 +326,7 @@ async function openaiMessageToAntigravity(openaiMessages, modelName) {
       const extracted = await extractImagesFromContent(message.content, modelName);
       handleUserMessage(extracted, antigravityMessages);
     } else if (message.role === "assistant") {
-      handleAssistantMessage(message, antigravityMessages, modelName);
+      handleAssistantMessage(message, antigravityMessages, modelName, openaiMessages.indexOf(message));
     } else if (message.role === "tool") {
       handleToolCall(message, antigravityMessages);
     }

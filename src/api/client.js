@@ -81,23 +81,42 @@ async function handleApiError(error, token, requestBody = null) {
   if (requestBody) {
     try {
       const logBody = JSON.parse(JSON.stringify(requestBody));
-      // Sanitize logBody contents to show word count for text
-      if (logBody.request?.contents) {
-        logBody.request.contents.forEach(msg => {
-          if (msg.role === 'user' && msg.parts) {
-            msg.parts.forEach(p => {
-              if (p.text && p.text.length > 100) {
-                const wordCount = p.text.split(/\s+/).length;
-                p.text = `[Text: ~${wordCount} words]`;
-              }
-            });
-          }
-        });
-      }
+      // Sanitize logBody contents to show word count for text - DISABLED for debugging
+      // if (logBody.request?.contents) {
+      //   logBody.request.contents.forEach(msg => {
+      //     if (msg.role === 'user' && msg.parts) {
+      //       msg.parts.forEach(p => {
+      //         if (p.text && p.text.length > 100) {
+      //           const wordCount = p.text.split(/\\s+/).length;
+      //           p.text = `[Text: ~${wordCount} words]`;
+      //         }
+      //       });
+      //     }
+      //   });
+      // }
       if (logBody.request?.tools) { log.error('[API Error] Tool Summary:', logBody.request.tools.map((t, i) => `[${i}] ${t.functionDeclarations?.[0]?.name || 'unknown'}`).join(', ')); log.error('[API Error] tools[7] Full Schema:', JSON.stringify(logBody.request.tools[7], null, 2)); logBody.request.tools = '<excluded>'; } log.error('[API Error] Request Body:', JSON.stringify(logBody, null, 2));
     } catch (e) { log.error('[API Error] Failed to stringify request body'); }
   }
-  if (requestBody.request?.contents) { log.error('--- Request Content Indices ---'); requestBody.request.contents.forEach((msg, idx) => { const types = msg.parts?.map(p => { if (p.functionCall) return `ToolCall:${p.functionCall.name}`; if (p.functionResponse) return `ToolResp:${p.functionResponse.name}`; return 'Text'; }).join(', ') || 'Empty'; log.error(`[Index ${idx}] ${msg.role}: ${types.substring(0, 100)}`); }); log.error('-------------------------------'); }
+  if (requestBody.request?.contents) {
+    log.error('--- Request Content Indices ---');
+    requestBody.request.contents.forEach((msg, idx) => {
+      const types = msg.parts?.map(p => {
+        if (p.functionCall) return `ToolCall:${p.functionCall.name}`;
+        if (p.functionResponse) return `ToolResp:${p.functionResponse.name}`;
+        return 'Text';
+      }).join(', ') || 'Empty';
+      log.error(`[Index ${idx}] ${msg.role}: ${types.substring(0, 100)}`);
+      // DEBUG: Log full part structure for model messages with thought
+      if (msg.role === 'model') {
+        msg.parts?.forEach((p, pIdx) => {
+          if (p.thought) {
+            log.error(`[DEBUG] MSG[${idx}].parts[${pIdx}] FULL KEYS:`, Object.keys(p));
+          }
+        });
+      }
+    });
+    log.error('-------------------------------');
+  }
 
   if (error.response?.data?.readable) {
     const chunks = [];
@@ -110,6 +129,16 @@ async function handleApiError(error, token, requestBody = null) {
   } else if (error.response?.data) {
     errorBody = error.response.data;
   }
+
+  // Extract Vertex request_id from error for correlation
+  try {
+    const errorJson = typeof errorBody === 'string' ? JSON.parse(errorBody) : errorBody;
+    const innerError = typeof errorJson?.message === 'string' ? JSON.parse(errorJson.message) : null;
+    const vertexRequestId = innerError?.request_id || errorJson?.request_id;
+    if (vertexRequestId) {
+      log.error(`[VERTEX-REQ-ID] ${vertexRequestId}`);
+    }
+  } catch (e) { /* ignore parse errors */ }
 
   if (status === 403) {
     tokenManager.disableCurrentToken(token);
