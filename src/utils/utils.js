@@ -303,6 +303,32 @@ async function openaiMessageToAntigravity(openaiMessages, modelName) {
   let systemText = "";
   const extractSystem = modelName && modelName.includes('claude');
 
+  // PREPROCESSING: Strip thinking blocks from assistant messages when followed by non-tool user messages
+  // Per Anthropic's rules: "Cache gets invalidated when non-tool-result user content is added, 
+  // causing all previous thinking blocks to be stripped"
+  // Only applicable for Claude models
+  const isClaudeModel = modelName && modelName.includes('claude');
+  if (isClaudeModel) {
+    for (let i = 0; i < openaiMessages.length; i++) {
+      const msg = openaiMessages[i];
+      if (msg.role === 'assistant' && msg.thinking) {
+        // Check if next message is a user message that is NOT a tool result
+        const nextMsg = openaiMessages[i + 1];
+        if (nextMsg && nextMsg.role === 'user') {
+          // Check if user message is NOT a tool result
+          const isToolResult = nextMsg.role === 'tool' ||
+            (Array.isArray(nextMsg.content) && nextMsg.content.some(c => c.type === 'tool_result'));
+
+          if (!isToolResult) {
+            log.info(`[STRIP-THINKING] MSG[${i}] Stripping thinking block (followed by non-tool user message)`);
+            delete msg.thinking;
+          }
+        }
+      }
+    }
+  }
+
+
   for (const message of openaiMessages) {
     if (message.role === "system") {
       if (extractSystem) {
