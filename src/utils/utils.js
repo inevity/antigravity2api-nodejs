@@ -19,7 +19,7 @@ function simpleHash(str) {
 // Module-level map to track toolCallId -> functionName for matching responses
 const toolCallIdToName = new Map();
 
-function extractImagesFromContent(content) {
+async function extractImagesFromContent(content, modelName) {
   const result = { text: '', images: [] };
 
   // 如果content是字符串，直接返回
@@ -34,8 +34,28 @@ function extractImagesFromContent(content) {
       if (item.type === 'text') {
         result.text += item.text;
       } else if (item.type === 'image_url') {
-        // 提取base64图片数据
         const imageUrl = item.image_url?.url || '';
+
+        // Handle Public URLs for Claude (Async Fetch)
+        if (modelName && modelName.includes('claude') && imageUrl.startsWith('http')) {
+             try {
+                 const resp = await fetch(imageUrl);
+                 if (resp.ok) {
+                     const buf = await resp.arrayBuffer();
+                     const base64Data = Buffer.from(buf).toString('base64');
+                     const mimeType = resp.headers.get('content-type') || 'image/jpeg';
+                     result.images.push({
+                         inlineData: {
+                             mimeType: mimeType,
+                             data: base64Data
+                         }
+                     });
+                     continue; // Skip base64 check
+                 }
+             } catch (e) {
+                 log.error('Failed to fetch image url:', imageUrl, e);
+             }
+        }
 
         // 匹配 data:image/{format};base64,{data} 格式
         const match = imageUrl.match(/^data:image\/(\w+);base64,(.+)$/);
@@ -173,11 +193,22 @@ function handleToolCall(message, antigravityMessages){
     });
   }
 }
-function openaiMessageToAntigravity(openaiMessages, modelName){
+async function openaiMessageToAntigravity(openaiMessages, modelName){
   const antigravityMessages = [];
+  let systemText = "";
+  const extractSystem = modelName && modelName.includes('claude');
+
   for (const message of openaiMessages) {
-    if (message.role === "user" || message.role === "system") {
-      const extracted = extractImagesFromContent(message.content);
+    if (message.role === "system") {
+      if (extractSystem) {
+        systemText += (systemText ? "\n" : "") + message.content;
+      } else {
+        // Fallback for non-Claude (Gemini): Treat as user message
+        const extracted = await extractImagesFromContent(message.content, modelName);
+        handleUserMessage(extracted, antigravityMessages);
+      }
+    } else if (message.role === "user") {
+      const extracted = await extractImagesFromContent(message.content, modelName);
       handleUserMessage(extracted, antigravityMessages);
     } else if (message.role === "assistant") {
       handleAssistantMessage(message, antigravityMessages, modelName);
@@ -186,7 +217,7 @@ function openaiMessageToAntigravity(openaiMessages, modelName){
     }
   }
   
-  return antigravityMessages;
+  return { contents: antigravityMessages, systemInstruction: systemText };
 }
 function generateGenerationConfig(parameters, enableThinking, actualModelName){
   const generationConfig = {
@@ -259,19 +290,22 @@ function isEnableThinking(modelName){
     modelName === "gpt-oss-120b-medium"
 }
 
-function generateRequestBody(openaiMessages,modelName,parameters,openaiTools,token){
+async function generateRequestBody(openaiMessages,modelName,parameters,openaiTools,token){
   
   const enableThinking = isEnableThinking(modelName);
   const actualModelName = modelMapping(modelName);
+  
+  const conversion = await openaiMessageToAntigravity(openaiMessages, actualModelName);
+  const combinedSystem = (config.systemInstruction ? config.systemInstruction + "\n" : "") + conversion.systemInstruction;
   
   return{
     project: token.projectId,
     requestId: generateRequestId(),
     request: {
-      contents: openaiMessageToAntigravity(openaiMessages, actualModelName),
+      contents: conversion.contents,
       systemInstruction: {
         role: "user",
-        parts: [{ text: config.systemInstruction }]
+        parts: [{ text: combinedSystem }]
       },
       tools: convertOpenAIToolsToAntigravity(openaiTools, actualModelName),
       toolConfig: {

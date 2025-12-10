@@ -95,10 +95,14 @@ async function handleApiError(error, token, requestBody = null) {
   
   if (status === 403) {
     tokenManager.disableCurrentToken(token);
-    throw new Error(`该账号没有使用权限，已自动禁用。错误详情: ${errorBody}`);
+    const finalError403 = new Error(`该账号没有使用权限，已自动禁用。错误详情: ${errorBody}`);
+    finalError403.status = 403;
+    throw finalError403;
   }
   
-  throw new Error(`API请求失败 (${status}): ${errorBody}`);
+  const finalError = new Error(errorBody);
+  finalError.status = status;
+  throw finalError;
 }
 
 // 转换 functionCall 为 OpenAI 格式
@@ -114,6 +118,18 @@ function convertToToolCall(functionCall) {
 }
 
 // 解析并发送流式响应片段（会修改 state 并触发 callback）
+function mapFinishReason(reason) {
+  if (!reason) return null;
+  switch (reason) {
+    case 'STOP': return 'stop';
+    case 'MAX_TOKENS': return 'length';
+    case 'SAFETY':
+    case 'MALICIOUS': return 'content_filter';
+    case 'Recitation': return 'content_filter';
+    default: return 'stop';
+  }
+}
+
 function parseAndEmitStreamChunk(line, state, callback) {
   if (!line.startsWith('data: ')) return;
   
@@ -175,6 +191,15 @@ function parseAndEmitStreamChunk(line, state, callback) {
         callback({ type: 'tool_calls', tool_calls: state.toolCalls });
         state.toolCalls = [];
       }
+      
+      const rawReason = data.response.candidates[0].finishReason;
+      let mappedReason = null;
+      
+      // Only map for Claude models as requested
+      if (state.model && state.model.includes('claude')) {
+         mappedReason = state.toolCalls.length > 0 ? 'tool_calls' : mapFinishReason(rawReason);
+         callback({ type: 'finish', finishReason: mappedReason });
+      }
       // 提取 token 使用统计
       const usage = data.response?.usageMetadata;
       if (usage) {
@@ -198,7 +223,7 @@ function parseAndEmitStreamChunk(line, state, callback) {
 export async function generateAssistantResponse(requestBody, token, callback) {
   
   const headers = buildHeaders(token);
-  const state = { thinkingStarted: false, toolCalls: [] };
+  const state = { thinkingStarted: false, toolCalls: [], model: requestBody.model || '' };
   let buffer = ''; // 缓冲区：处理跨 chunk 的不完整行
   
   const processChunk = (chunk) => {
@@ -370,7 +395,16 @@ export async function generateAssistantResponseNoStream(requestBody, token) {
     content = `${thinkTag}\n${thinkingContent}\n</think>\n${content}`;
   }
   
-  // 提取 token 使用统计
+  
+      const rawReason = data.response.candidates[0].finishReason;
+      let mappedReason = null;
+      
+      // Only map for Claude models as requested
+      if (state.model && state.model.includes('claude')) {
+         mappedReason = state.toolCalls.length > 0 ? 'tool_calls' : mapFinishReason(rawReason);
+         callback({ type: 'finish', finishReason: mappedReason });
+      }
+      // 提取 token 使用统计
   const usage = data.response?.usageMetadata;
   const usageData = usage ? {
     prompt_tokens: usage.promptTokenCount || 0,
@@ -379,13 +413,19 @@ export async function generateAssistantResponseNoStream(requestBody, token) {
   } : null;
   
   // 生图模型：转换为 markdown 格式
+  
+  let finishReason = undefined;
+  if (requestBody.model && requestBody.model.includes('claude')) {
+      const rawFinishReason = data.response?.candidates?.[0]?.finishReason;
+      finishReason = toolCalls.length > 0 ? 'tool_calls' : mapFinishReason(rawFinishReason);
+  }
   if (imageUrls.length > 0) {
     let markdown = content ? content + '\n\n' : '';
     markdown += imageUrls.map(url => `![image](${url})`).join('\n\n');
-    return { content: markdown, toolCalls, usage: usageData };
+    return { content: markdown, toolCalls, usage: usageData, finishReason };
   }
   
-  return { content, toolCalls, usage: usageData };
+  return { content, toolCalls, usage: usageData, finishReason };
 }
 
 export function closeRequester() {
