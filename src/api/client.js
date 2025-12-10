@@ -337,12 +337,16 @@ export async function generateAssistantResponseNoStream(requestBody, token) {
   const parts = data.response?.candidates?.[0]?.content?.parts || [];
   let content = '';
   let thinkingContent = '';
+  let thinkingSignature = '';
   const toolCalls = [];
   const imageUrls = [];
   
   for (const part of parts) {
     if (part.thought === true) {
       thinkingContent += part.text || '';
+      if (!thinkingSignature && (part.thoughtSignature || part.thought_signature)) {
+        thinkingSignature = part.thoughtSignature || part.thought_signature;
+      }
     } else if (part.text !== undefined) {
       content += part.text;
     } else if (part.functionCall) {
@@ -362,7 +366,8 @@ export async function generateAssistantResponseNoStream(requestBody, token) {
   
   // 拼接思维链标签
   if (thinkingContent) {
-    content = `<think>\n${thinkingContent}\n</think>\n${content}`;
+    const thinkTag = thinkingSignature ? `<think signature="${thinkingSignature}">` : '<think>';
+    content = `${thinkTag}\n${thinkingContent}\n</think>\n${content}`;
   }
   
   // 提取 token 使用统计

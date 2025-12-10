@@ -104,7 +104,25 @@ function handleAssistantMessage(message, antigravityMessages, modelName){
     lastMessage.parts.push(...antigravityTools)
   }else{
     const parts = [];
-    if (hasContent) parts.push({ text: message.content.trimEnd() });
+    if (hasContent) {
+      const content = message.content.trimEnd();
+      const thinkMatch = (modelName && modelName.includes('claude')) ? content.match(/<think(?: signature=\"(.+?)\")?>([\s\S]*?)<\/think>/) : null;
+      if (thinkMatch) {
+        const signature = thinkMatch[1] || null;
+        const thoughtText = thinkMatch[2].trim();
+        if (thoughtText) {
+          const part = { text: thoughtText, thought: true };
+          if (signature) part.signature = signature; // Add signature if captured
+          parts.push(part);
+        }
+        const remainingText = content.replace(thinkMatch[0], "").trim();
+        if (remainingText) {
+          parts.push({ text: remainingText });
+        }
+      } else {
+        parts.push({ text: content });
+      }
+    }
     parts.push(...antigravityTools);
     
     antigravityMessages.push({
