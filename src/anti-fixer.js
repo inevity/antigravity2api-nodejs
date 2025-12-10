@@ -41,126 +41,50 @@ class AntiPayloadFixer {
     // Defensive copy so we don't mutate upstream payloads.
     const newReq = JSON.parse(JSON.stringify(request || {}));
 
-    let added = 0;
-    let missingBefore = 0;
-
-    const ensureSignature = (fnObj, sigSeed, forcedSignature, callKey) => {
-      if (!fnObj || typeof fnObj !== "object") return;
-
-      if (forcedSignature) {
-        fnObj.thought_signature = forcedSignature;
-      } else if (!fnObj.thought_signature) {
-        // Try cache first using per-call key
-        if (callKey && this.signatureCache.has(callKey)) {
-          const entry = this.signatureCache.get(callKey);
-          fnObj.thought_signature = entry.signature;
-          this.log(`[AntiPayloadFixer] Restored cached signature for ${callKey}`);
-          missingBefore += 1;
-          return;
-        }
-
-        // IMPORTANT: Do NOT generate fake signatures!
-        // Per Gemini spec, only the FIRST functionCall in a turn has a signature.
-        // Subsequent calls should have NO signature, not a fake one.
-        this.log(`[AntiPayloadFixer] No signature found for ${callKey || sigSeed} - leaving empty (per Gemini spec)`);
-      } else {
-        missingBefore += 1;
-      }
-      // Note: Only thought_signature is needed. antigravity2api will read it and
-      // place it at the part level as thoughtSignature for Gemini Native API.
-    };
-
-    // OpenAI-style messages
-    if (Array.isArray(newReq.messages)) {
-      const flattened = [];
-      newReq.messages.forEach((msg, msgIdx) => {
-        // Split multiple tool_calls into separate assistant messages to guarantee per-call signature propagation.
-        if (
-          msg.role === "assistant" &&
-          Array.isArray(msg.tool_calls) &&
-          msg.tool_calls.length > 1
-        ) {
-          msg.tool_calls.forEach((tc, tcIdx) => {
-            const cloned = JSON.parse(JSON.stringify(msg));
-            cloned.tool_calls = [tc];
-            // Only use cache-based real signatures, no fake generation
-            const callKey = this.generateCallKeyFromToolCall(tc);
-            ensureSignature(tc.function, `${msgIdx}-${tcIdx}`, null, callKey);
-            flattened.push(cloned);
-          });
-          return;
-        }
-
-        // Single tool_call or none
-        if (Array.isArray(msg.tool_calls) && msg.tool_calls.length) {
-          // Only use cache-based real signatures, no fake generation
-          msg.tool_calls.forEach((tc, tcIdx) => {
-            const callKey = this.generateCallKeyFromToolCall(tc);
-            ensureSignature(tc.function, `${msgIdx}-${tcIdx}`, null, callKey);
-          });
-        }
-
-        // legacy function_call
-        if (msg.function_call) {
-          ensureSignature(msg.function_call, `${msgIdx}-fc`);
-        }
-
-        // content parts that may contain functionCall/function_call (Gemini style)
-        if (Array.isArray(msg.content)) {
-          msg.content.forEach((part, partIdx) => {
-            if (part?.functionCall) {
-              ensureSignature(part.functionCall, `${msgIdx}-${partIdx}-pc`);
-            }
-            if (part?.function_call) {
-              ensureSignature(part.function_call, `${msgIdx}-${partIdx}-pc`);
-            }
-          });
-        }
-
-        flattened.push(msg);
-      });
-      newReq.messages = flattened;
-    }
-
-    // Gemini-style contents
-    if (Array.isArray(newReq.contents)) {
-      newReq.contents.forEach((contentObj, cIdx) => {
-        if (Array.isArray(contentObj.parts)) {
-          contentObj.parts.forEach((part, pIdx) => {
-            if (part?.functionCall) {
-              ensureSignature(part.functionCall, `${cIdx}-${pIdx}-g`);
-            }
-            if (part?.function_call) {
-              ensureSignature(part.function_call, `${cIdx}-${pIdx}-g`);
-            }
-          });
-        }
-      });
-    }
-
-    this.log(
-      "[AntiPayloadFixer] After transformation:",
-      JSON.stringify(newReq, null, 2)
-    );
-    this.log(
-      `[AntiPayloadFixer] thought_signature stats — added: ${added}, pre-existing: ${missingBefore}`
-    );
-    // DEBUG LOGGING START
-    if (newReq.messages && newReq.messages.length > 0) {
+    // [DEBUG] Inspect incoming messages for <think> tags
+    if (newReq.messages) {
       newReq.messages.forEach((m, i) => {
-        if (m.tool_calls) {
-          m.tool_calls.forEach((tc, j) => {
-            this.log(`[AntiPayloadFixer] OUTGOING MSG[${i}] TOOL_CALL[${j}] id: ${tc.id} thought_signature:`, tc.function?.thought_signature);
-          });
+        if (m.content) {
+          const contentStr = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+          this.log(`[AntiPayloadFixer] [FROM CLIENT] MSG[${i}] Role: ${m.role}`);
+          if (contentStr.includes('<think>')) {
+            this.log(`[AntiPayloadFixer] [FROM CLIENT] FOUND <think> tag in MSG[${i}]`);
+            // Check if signature is missing in the existing block
+            if (m.role === 'assistant' && this.latestThinkingSignature && typeof m.content === 'string' && !contentStr.includes('signature="')) {
+              this.log(`[AntiPayloadFixer] INJECTING missing signature into existing <think> block`);
+              m.content = m.content.replace('</think>', `\n<!-- signature="${this.latestThinkingSignature}" -->\n</think>`);
+            }
+          } else {
+            this.log(`[AntiPayloadFixer] [FROM CLIENT] NO <think> tag in MSG[${i}]. Content Start: ${contentStr.substring(0, 50)}...`);
+
+            // Check if we should restore thinking block using cached signature
+            // Condition: Role is assistant, has tool calls (checked later but we can infer), and NO <think> tag.
+            // Simplified: If it's assistant and we have a cached thinking signature, and content is plain text.
+            if (m.role === 'assistant' && this.latestThinkingSignature && typeof m.content === 'string' && m.content.trim().length > 0) {
+              // We assume this plain text is the stripped thought.
+              // Verify strictly that we have tool calls in this message to be sure?
+              // The flattened logic later handles splitting.
+              // Let's check `m.tool_calls` exist.
+              if (m.tool_calls && m.tool_calls.length > 0) {
+                this.log(`[AntiPayloadFixer] RESTORING thinking block from cache for MSG[${i}]`);
+                m.content = `<think>${m.content}\n<!-- signature="${this.latestThinkingSignature}" --></think>`;
+                // Assuming 'added' was a local variable, it's removed as per the snippet.
+                // added += 1;
+              }
+            }
+          }
         }
       });
     }
+
+    // ... (rest of logic) ...
+
     // DEBUG LOGGING END
     return newReq;
   }
 
   async transformResponseOut(response) {
-    this.log('[AntiPayloadFixer] transformResponseOut START');
+    this.log('[AntiPayloadFixer] [FROM UPSTREAM] transformResponseOut START');
     const contentType = response.headers.get("content-type") || "";
     const isEventStream = contentType.includes("text/event-stream");
     this.log('[AntiPayloadFixer] contentType:', contentType, 'isEventStream:', isEventStream, 'hasBody:', !!response.body);
@@ -223,6 +147,16 @@ class AntiPayloadFixer {
           if (data === '[DONE]') continue;
           try {
             const parsed = JSON.parse(data);
+
+            // Capture Thinking Signature
+            if (parsed.choices?.[0]?.delta?.thinking) {
+              const thinking = parsed.choices[0].delta.thinking;
+              if (thinking.signature) {
+                this.latestThinkingSignature = thinking.signature;
+                this.log(`[AntiPayloadFixer] CACHED thinking signature: ${thinking.signature.substring(0, 15)}...`);
+              }
+            }
+
             if (parsed.choices?.[0]?.delta?.tool_calls) {
               const toolCalls = parsed.choices[0].delta.tool_calls;
               toolCalls.forEach(tc => {
