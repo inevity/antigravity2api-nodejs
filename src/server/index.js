@@ -102,7 +102,7 @@ app.get('/v1/models', async (req, res) => {
 
 
 app.post('/v1/chat/completions', async (req, res) => {
-  const { messages, model, stream = false, tools, ...params} = req.body;
+  const { messages, model, stream = false, tools, ...params } = req.body;
   try {
     if (!messages) {
       return res.status(400).json({ error: 'messages is required' });
@@ -114,25 +114,25 @@ app.post('/v1/chat/completions', async (req, res) => {
     const isImageModel = model.includes('-image');
     const requestBody = await generateRequestBody(messages, model, params, tools, token);
     if (isImageModel) {
-      requestBody.request.generationConfig={
+      requestBody.request.generationConfig = {
         candidateCount: 1,
         // imageConfig:{
         //   aspectRatio: "1:1"
         // }
       }
-      requestBody.requestType="image_gen";
+      requestBody.requestType = "image_gen";
       //requestBody.request.systemInstruction.parts[0].text += "现在你作为绘画模型聚焦于帮助用户生成图片";
       delete requestBody.request.systemInstruction;
       delete requestBody.request.tools;
       delete requestBody.request.toolConfig;
     }
     //console.log(JSON.stringify(requestBody,null,2))
-    
+
     const { id, created } = createResponseMeta();
-    
+
     if (stream) {
       setStreamHeaders(res);
-      
+
       if (isImageModel) {
         const { content, usage } = await generateAssistantResponseNoStream(requestBody, token);
         writeStreamData(res, createStreamChunk(id, created, model, { content }));
@@ -145,9 +145,11 @@ app.post('/v1/chat/completions', async (req, res) => {
           if (data.type === 'usage') {
             usageData = data.usage;
           } else {
-            const delta = data.type === 'tool_calls' 
-              ? { tool_calls: data.tool_calls } 
-              : { content: data.content };
+            const delta = data.type === 'tool_calls'
+              ? { tool_calls: data.tool_calls }
+              : data.type === 'thinking'
+                ? { thinking: { content: data.content, signature: data.signature } }
+                : { content: data.content };
             if (data.type === 'tool_calls') hasToolCall = true;
             writeStreamData(res, createStreamChunk(id, created, model, delta));
           }
@@ -159,7 +161,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       const { content, toolCalls, usage } = await generateAssistantResponseNoStream(requestBody, token);
       const message = { role: 'assistant', content };
       if (toolCalls.length > 0) message.tool_calls = toolCalls;
-      
+
       res.json({
         id,
         object: 'chat.completion',
@@ -179,45 +181,45 @@ app.post('/v1/chat/completions', async (req, res) => {
       // Claude-specific: Return actual HTTP errors for API failures
       if (model && model.includes('claude') && error.status && error.status >= 400) {
         let errorJson;
-        try { errorJson = JSON.parse(error.message); } catch(e) { }
-        
+        try { errorJson = JSON.parse(error.message); } catch (e) { }
+
         // Construct standard OpenAI Error format
         const errorResponse = {
-            error: {
-                message: errorJson?.error?.message || errorJson?.message || error.message,
-                type: 'invalid_request_error',
-                code: error.status,
-                param: null 
-            }
+          error: {
+            message: errorJson?.error?.message || errorJson?.message || error.message,
+            type: 'invalid_request_error',
+            code: error.status,
+            param: null
+          }
         };
         // If the upstream error already has the structure, try to use it? 
         // Google errors are usually { error: { code, message, status } }
         // We'll stick to a clean wrapper.
-        
+
         if (stream) {
-             // For stream, we must send an error event if possible or just end?
-             // Usually streaming clients handle HTTP status on connect, but if headers not sent...
-             // setHeaders was called inside 'if (stream)' block? 
-             // Wait, `if (stream)` block calls `setStreamHeaders(res)`. 
-             // If we are here, headers might NOT be sent if error happened in `generateAssistantResponse` (which is awaited).
-             // But `generateAssistantResponse` is awaited *inside* `if (stream)`.
-             // `setStreamHeaders` is called *before* await.
-             // So headers ARE sent (200 OK).
-             // We cannot send 400 now. We must send generic error in stream.
-             // So this 400 logic only applies if `!stream` OR if headers NOT sent.
-             // But the catch block checks `if (!res.headersSent)`.
-             
-             // If headers SENT, we fall through to existing logic (writeStreamData).
-             // If headers NOT SENT, we can send 400.
-             
-             return res.status(error.status).json(errorResponse);
+          // For stream, we must send an error event if possible or just end?
+          // Usually streaming clients handle HTTP status on connect, but if headers not sent...
+          // setHeaders was called inside 'if (stream)' block? 
+          // Wait, `if (stream)` block calls `setStreamHeaders(res)`. 
+          // If we are here, headers might NOT be sent if error happened in `generateAssistantResponse` (which is awaited).
+          // But `generateAssistantResponse` is awaited *inside* `if (stream)`.
+          // `setStreamHeaders` is called *before* await.
+          // So headers ARE sent (200 OK).
+          // We cannot send 400 now. We must send generic error in stream.
+          // So this 400 logic only applies if `!stream` OR if headers NOT sent.
+          // But the catch block checks `if (!res.headersSent)`.
+
+          // If headers SENT, we fall through to existing logic (writeStreamData).
+          // If headers NOT SENT, we can send 400.
+
+          return res.status(error.status).json(errorResponse);
         } else {
-             return res.status(error.status).json(errorResponse);
+          return res.status(error.status).json(errorResponse);
         }
       }
       const { id, created } = createResponseMeta();
       const errorContent = `错误: ${error.message}`;
-      
+
       if (stream) {
         setStreamHeaders(res);
         writeStreamData(res, createStreamChunk(id, created, model, { content: errorContent }));

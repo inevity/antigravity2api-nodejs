@@ -162,8 +162,9 @@ function handleAssistantMessage(message, antigravityMessages, modelName) {
         if (thoughtText) {
           const part = { text: thoughtText, thought: true };
           if (!signature) {
-            log.warn('[THOUGHT-IN] Regex passed thinking WITHOUT signature! Using fallback.');
-            signature = 'redacted_thinking';
+            log.warn('[THOUGHT-IN] Regex passed thinking WITHOUT signature! Fallback disabled.');
+            // Use 64 bytes of zeros encoded in Base64
+            // signature = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==';
           }
           part.thoughtSignature = signature;
           parts.push(part);
@@ -173,16 +174,41 @@ function handleAssistantMessage(message, antigravityMessages, modelName) {
           parts.push({ text: remainingText });
         }
       } else if (!message.thinking && content) {
-        log.info(`[THOUGHT-IN] Treating content as text. (No regex match).\nContent Start: ${content.substring(0, 50)}\nFull Content Length: ${content.length}`);
-        // Optional: Log full content if short enough, or to a separate debug line
-        if (content.length < 500) log.info(`[THOUGHT-IN-FULL] ${content}`);
-        parts.push({ text: content });
+        // [THOUGHT RESTORE]
+        // If the client strips <think> tags but sends the text content, AND we have tool_calls,
+        // we must treat this text as the thinking block to satisfy the API.
+        const shouldRestoreThinking = isEnableThinking(modelName) && modelName.includes('claude') && hasToolCalls;
+
+        if (shouldRestoreThinking) {
+          let restoredSig = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="; // valid base64 fallback
+          let cleanContent = content;
+
+          // Attempt to recover REAL signature from visible text marker
+          const sigMatch = content.match(/\[SIG:([^\]]+)\]/);
+          if (sigMatch) {
+            restoredSig = sigMatch[1];
+            cleanContent = content.replace(sigMatch[0], '').trim();
+            log.info(`[THOUGHT-RESTORE] Recovered REAL signature from history! SigPrefix=${restoredSig.substring(0, 10)}...`);
+          }
+
+          const preview = cleanContent.substring(0, 100).replace(/\n/g, ' ');
+          log.info(`[THOUGHT-RESTORE] Converting plain text to thinking block. Content: "${preview}..."`);
+          parts.push({
+            text: cleanContent,
+            thought: true,
+            thoughtSignature: restoredSig
+          });
+        } else {
+          // Normal text content
+          log.info(`[THOUGHT-IN] Treating content as text. (No regex match)`);
+          parts.push({ text: content });
+        }
       }
     }
 
     // SAFETY FIX: Check if we are missing a required thinking block
-    // This happens if the client sends tool_calls but lost the thought history.
-    /* 
+    // [DISABLED] Replaced by [THOUGHT RESTORE] above, which uses actual content.
+    /*
     if (isEnableThinking(modelName) && modelName.includes('claude') && hasToolCalls && !parts.some(p => p.thought === true)) {
       log.warn(`[ThoughtFix] Missing thinking block for ${modelName} with tool_calls. Injecting redacted_thinking.`);
       parts.unshift({
@@ -190,7 +216,7 @@ function handleAssistantMessage(message, antigravityMessages, modelName) {
         thought: true,
         thoughtSignature: "AAAA" // Base64 placeholder (e.g. 0x00 0x00 0x00)
       });
-    } 
+    }
     */
 
     parts.push(...antigravityTools);

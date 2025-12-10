@@ -175,7 +175,7 @@ function parseAndEmitStreamChunk(line, state, callback) {
         } else if (part.text !== undefined) {
           // 普通文本内容
           if (state.thinkingStarted) {
-            callback({ type: 'thinking', content: (state.model && state.model.includes('claude') && state.thoughtSignature) ? `\n<!-- signature="${state.thoughtSignature}" -->\n</think>\n` : '\n</think>\n' });
+            callback({ type: 'thinking', content: '', signature: state.thoughtSignature });
             state.thinkingStarted = false;
           }
           // Capture text part signature if present (optional but recommended)
@@ -209,7 +209,7 @@ function parseAndEmitStreamChunk(line, state, callback) {
     // 响应结束时发送工具调用和使用统计
     if (data.response?.candidates?.[0]?.finishReason) {
       if (state.thinkingStarted) {
-        callback({ type: 'thinking', content: (state.model && state.model.includes('claude') && state.thoughtSignature) ? `\n<!-- signature="${state.thoughtSignature}" -->\n</think>\n` : '\n</think>\n' });
+        callback({ type: 'thinking', content: '', signature: state.thoughtSignature });
         state.thinkingStarted = false;
       }
       if (state.toolCalls.length > 0) {
