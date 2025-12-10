@@ -126,13 +126,24 @@ function handleAssistantMessage(message, antigravityMessages, modelName){
     const parts = [];
     if (hasContent) {
       const content = message.content.trimEnd();
-      const thinkMatch = (modelName && modelName.includes('claude')) ? content.match(/<think(?: signature=\"(.+?)\")?>([\s\S]*?)<\/think>/) : null;
+      const thinkMatch = (modelName && modelName.includes('claude')) ? content.match(/<think(?:[\s\S]*?)>([\s\S]*?)<\/think(?:[\s\S]*?)>/) : null;
       if (thinkMatch) {
-        const signature = thinkMatch[1] || null;
-        const thoughtText = thinkMatch[2].trim();
+        // Check for signature in attribute (legacy/Gemini) OR markdown comment (hidden)
+        let signatureMatch = thinkMatch[0].match(/signature="([^"]+)"/);
+        let signature = signatureMatch ? signatureMatch[1] : null;
+        
+        let thoughtText = thinkMatch[1].trim();
+        
+        // Check for signature in markdown comment inside content: <!-- signature="sig" -->
+        const commentMatch = thoughtText.match(/<!-- signature="([^"]+)" -->/);
+        if (commentMatch) {
+            if (!signature) signature = commentMatch[1];
+            // Remove the comment from the visible thought text
+            thoughtText = thoughtText.replace(commentMatch[0], '').trim();
+        }
         if (thoughtText) {
           const part = { text: thoughtText, thought: true };
-          if (signature) part.signature = signature; // Add signature if captured
+          if (signature) part.thoughtSignature = signature; // Add signature if captured
           parts.push(part);
         }
         const remainingText = content.replace(thinkMatch[0], "").trim();

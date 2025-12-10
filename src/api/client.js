@@ -78,7 +78,21 @@ function buildRequesterConfig(headers, body = null) {
 async function handleApiError(error, token, requestBody = null) {
   const status = error.response?.status || error.status || 'Unknown';
   let errorBody = error.message;
-  if (requestBody) { try { const logBody = JSON.parse(JSON.stringify(requestBody)); if (logBody.request?.tools) { log.error('[API Error] Tool Summary:', logBody.request.tools.map((t, i) => `[${i}] ${t.functionDeclarations?.[0]?.name || 'unknown'}`).join(', ')); log.error('[API Error] tools[7] Full Schema:', JSON.stringify(logBody.request.tools[7], null, 2)); logBody.request.tools = '<excluded>'; } log.error('[API Error] Request Body:', JSON.stringify(logBody, null, 2)); } catch (e) { log.error('[API Error] Failed to stringify request body'); } }
+  if (requestBody) { try { const logBody = JSON.parse(JSON.stringify(requestBody));
+        // Sanitize logBody contents to show word count for text
+        if (logBody.request?.contents) {
+          logBody.request.contents.forEach(msg => {
+            if (msg.role === 'user' && msg.parts) {
+              msg.parts.forEach(p => {
+                if (p.text && p.text.length > 100) {
+                   const wordCount = p.text.split(/\s+/).length;
+                   p.text = `[Text: ~${wordCount} words]`;
+                }
+              });
+            }
+          });
+        }
+ if (logBody.request?.tools) { log.error('[API Error] Tool Summary:', logBody.request.tools.map((t, i) => `[${i}] ${t.functionDeclarations?.[0]?.name || 'unknown'}`).join(', ')); log.error('[API Error] tools[7] Full Schema:', JSON.stringify(logBody.request.tools[7], null, 2)); logBody.request.tools = '<excluded>'; } log.error('[API Error] Request Body:', JSON.stringify(logBody, null, 2)); } catch (e) { log.error('[API Error] Failed to stringify request body'); } }
       if (requestBody.request?.contents) { log.error('--- Request Content Indices ---'); requestBody.request.contents.forEach((msg, idx) => { const types = msg.parts?.map(p => { if (p.functionCall) return `ToolCall:${p.functionCall.name}`; if (p.functionResponse) return `ToolResp:${p.functionResponse.name}`; return 'Text'; }).join(', ') || 'Empty'; log.error(`[Index ${idx}] ${msg.role}: ${types.substring(0, 100)}`); }); log.error('-------------------------------'); }
   
   if (error.response?.data?.readable) {
@@ -140,6 +154,12 @@ function parseAndEmitStreamChunk(line, state, callback) {
     
     if (parts) {
       for (const part of parts) {
+        if (part.thoughtSignature || part.thought_signature) {
+             state.thoughtSignature = part.thoughtSignature || part.thought_signature;
+        }
+        if (part.thought || part.thoughtSignature || part.thought_signature) {
+          log.info(`[THOUGHT DEBUG] thought=${part.thought} sig=${part.thoughtSignature || part.thought_signature} textlen=${(part.text||'').length}`);
+        }
         if (part.thought === true) {
           // 思维链内容
           if (!state.thinkingStarted) {
@@ -150,7 +170,7 @@ function parseAndEmitStreamChunk(line, state, callback) {
         } else if (part.text !== undefined) {
           // 普通文本内容
           if (state.thinkingStarted) {
-            callback({ type: 'thinking', content: '\n</think>\n' });
+            callback({ type: 'thinking', content: (state.model && state.model.includes('claude') && state.thoughtSignature) ? `\n<!-- signature="${state.thoughtSignature}" -->\n</think>\n` : '\n</think>\n' });
             state.thinkingStarted = false;
           }
           // Capture text part signature if present (optional but recommended)
@@ -184,7 +204,7 @@ function parseAndEmitStreamChunk(line, state, callback) {
     // 响应结束时发送工具调用和使用统计
     if (data.response?.candidates?.[0]?.finishReason) {
       if (state.thinkingStarted) {
-        callback({ type: 'thinking', content: '\n</think>\n' });
+        callback({ type: 'thinking', content: (state.model && state.model.includes('claude') && state.thoughtSignature) ? `\n<!-- signature="${state.thoughtSignature}" -->\n</think>\n` : '\n</think>\n' });
         state.thinkingStarted = false;
       }
       if (state.toolCalls.length > 0) {
@@ -367,6 +387,12 @@ export async function generateAssistantResponseNoStream(requestBody, token) {
   const imageUrls = [];
   
   for (const part of parts) {
+        if (part.thoughtSignature || part.thought_signature) {
+             state.thoughtSignature = part.thoughtSignature || part.thought_signature;
+        }
+        if (part.thought || part.thoughtSignature || part.thought_signature) {
+          log.info(`[THOUGHT DEBUG] thought=${part.thought} sig=${part.thoughtSignature || part.thought_signature} textlen=${(part.text||'').length}`);
+        }
     if (part.thought === true) {
       thinkingContent += part.text || '';
       if (!thinkingSignature && (part.thoughtSignature || part.thought_signature)) {
