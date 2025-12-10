@@ -78,23 +78,27 @@ function buildRequesterConfig(headers, body = null) {
 async function handleApiError(error, token, requestBody = null) {
   const status = error.response?.status || error.status || 'Unknown';
   let errorBody = error.message;
-  if (requestBody) { try { const logBody = JSON.parse(JSON.stringify(requestBody));
-        // Sanitize logBody contents to show word count for text
-        if (logBody.request?.contents) {
-          logBody.request.contents.forEach(msg => {
-            if (msg.role === 'user' && msg.parts) {
-              msg.parts.forEach(p => {
-                if (p.text && p.text.length > 100) {
-                   const wordCount = p.text.split(/\s+/).length;
-                   p.text = `[Text: ~${wordCount} words]`;
-                }
-              });
-            }
-          });
-        }
- if (logBody.request?.tools) { log.error('[API Error] Tool Summary:', logBody.request.tools.map((t, i) => `[${i}] ${t.functionDeclarations?.[0]?.name || 'unknown'}`).join(', ')); log.error('[API Error] tools[7] Full Schema:', JSON.stringify(logBody.request.tools[7], null, 2)); logBody.request.tools = '<excluded>'; } log.error('[API Error] Request Body:', JSON.stringify(logBody, null, 2)); } catch (e) { log.error('[API Error] Failed to stringify request body'); } }
-      if (requestBody.request?.contents) { log.error('--- Request Content Indices ---'); requestBody.request.contents.forEach((msg, idx) => { const types = msg.parts?.map(p => { if (p.functionCall) return `ToolCall:${p.functionCall.name}`; if (p.functionResponse) return `ToolResp:${p.functionResponse.name}`; return 'Text'; }).join(', ') || 'Empty'; log.error(`[Index ${idx}] ${msg.role}: ${types.substring(0, 100)}`); }); log.error('-------------------------------'); }
-  
+  if (requestBody) {
+    try {
+      const logBody = JSON.parse(JSON.stringify(requestBody));
+      // Sanitize logBody contents to show word count for text
+      if (logBody.request?.contents) {
+        logBody.request.contents.forEach(msg => {
+          if (msg.role === 'user' && msg.parts) {
+            msg.parts.forEach(p => {
+              if (p.text && p.text.length > 100) {
+                const wordCount = p.text.split(/\s+/).length;
+                p.text = `[Text: ~${wordCount} words]`;
+              }
+            });
+          }
+        });
+      }
+      if (logBody.request?.tools) { log.error('[API Error] Tool Summary:', logBody.request.tools.map((t, i) => `[${i}] ${t.functionDeclarations?.[0]?.name || 'unknown'}`).join(', ')); log.error('[API Error] tools[7] Full Schema:', JSON.stringify(logBody.request.tools[7], null, 2)); logBody.request.tools = '<excluded>'; } log.error('[API Error] Request Body:', JSON.stringify(logBody, null, 2));
+    } catch (e) { log.error('[API Error] Failed to stringify request body'); }
+  }
+  if (requestBody.request?.contents) { log.error('--- Request Content Indices ---'); requestBody.request.contents.forEach((msg, idx) => { const types = msg.parts?.map(p => { if (p.functionCall) return `ToolCall:${p.functionCall.name}`; if (p.functionResponse) return `ToolResp:${p.functionResponse.name}`; return 'Text'; }).join(', ') || 'Empty'; log.error(`[Index ${idx}] ${msg.role}: ${types.substring(0, 100)}`); }); log.error('-------------------------------'); }
+
   if (error.response?.data?.readable) {
     const chunks = [];
     for await (const chunk of error.response.data) {
@@ -106,14 +110,14 @@ async function handleApiError(error, token, requestBody = null) {
   } else if (error.response?.data) {
     errorBody = error.response.data;
   }
-  
+
   if (status === 403) {
     tokenManager.disableCurrentToken(token);
     const finalError403 = new Error(`该账号没有使用权限，已自动禁用。错误详情: ${errorBody}`);
     finalError403.status = 403;
     throw finalError403;
   }
-  
+
   const finalError = new Error(errorBody);
   finalError.status = status;
   throw finalError;
@@ -146,19 +150,20 @@ function mapFinishReason(reason) {
 
 function parseAndEmitStreamChunk(line, state, callback) {
   if (!line.startsWith('data: ')) return;
-  
+
   try {
     const data = JSON.parse(line.slice(6));
-    //console.log(JSON.stringify(data));
+    log.info('[LLM_RESPONSE] ' + JSON.stringify(data));
     const parts = data.response?.candidates?.[0]?.content?.parts;
-    
+
     if (parts) {
       for (const part of parts) {
         if (part.thoughtSignature || part.thought_signature) {
-             state.thoughtSignature = part.thoughtSignature || part.thought_signature;
+          state.thoughtSignature = part.thoughtSignature || part.thought_signature;
         }
+
         if (part.thought || part.thoughtSignature || part.thought_signature) {
-          log.info(`[THOUGHT DEBUG] thought=${part.thought} sig=${part.thoughtSignature || part.thought_signature} textlen=${(part.text||'').length}`);
+          log.info(`[THOUGHT DEBUG] thought=${part.thought} sig=${part.thoughtSignature || part.thought_signature} textlen=${(part.text || '').length}`);
         }
         if (part.thought === true) {
           // 思维链内容
@@ -200,7 +205,7 @@ function parseAndEmitStreamChunk(line, state, callback) {
         }
       }
     }
-    
+
     // 响应结束时发送工具调用和使用统计
     if (data.response?.candidates?.[0]?.finishReason) {
       if (state.thinkingStarted) {
@@ -211,20 +216,13 @@ function parseAndEmitStreamChunk(line, state, callback) {
         callback({ type: 'tool_calls', tool_calls: state.toolCalls });
         state.toolCalls = [];
       }
-      
-      const rawReason = data.response.candidates[0].finishReason;
-      let mappedReason = null;
-      
-      // Map for Claude and Gemini models
-      if (state.model && (state.model.includes('claude') || state.model.includes('gemini'))) {
-         mappedReason = state.toolCalls.length > 0 ? 'tool_calls' : mapFinishReason(rawReason);
-         callback({ type: 'finish', finishReason: mappedReason });
-      }
+
+
       // 提取 token 使用统计
       const usage = data.response?.usageMetadata;
       if (usage) {
-        callback({ 
-          type: 'usage', 
+        callback({
+          type: 'usage',
           usage: {
             prompt_tokens: usage.promptTokenCount || 0,
             completion_tokens: usage.candidatesTokenCount || 0,
@@ -241,23 +239,23 @@ function parseAndEmitStreamChunk(line, state, callback) {
 // ==================== 导出函数 ====================
 
 export async function generateAssistantResponse(requestBody, token, callback) {
-  
+
   const headers = buildHeaders(token);
   const state = { thinkingStarted: false, toolCalls: [], model: requestBody.model || '' };
   let buffer = ''; // 缓冲区：处理跨 chunk 的不完整行
-  
+
   const processChunk = (chunk) => {
     buffer += chunk;
     const lines = buffer.split('\n');
     buffer = lines.pop(); // 保留最后一行（可能不完整）
     lines.forEach(line => parseAndEmitStreamChunk(line, state, callback));
   };
-  
+
   if (useAxios) {
     try {
       const axiosConfig = { ...buildAxiosConfig(config.api.url, headers, requestBody), responseType: 'stream' };
       const response = await axios(axiosConfig);
-      
+
       response.data.on('data', chunk => processChunk(chunk.toString()));
       await new Promise((resolve, reject) => {
         response.data.on('end', resolve);
@@ -288,9 +286,9 @@ export async function generateAssistantResponse(requestBody, token, callback) {
 export async function getAvailableModels() {
   const token = await tokenManager.getToken();
   if (!token) throw new Error('没有可用的token，请运行 npm run login 获取token');
-  
+
   const headers = buildHeaders(token);
-  
+
   try {
     let data;
     if (useAxios) {
@@ -305,18 +303,18 @@ export async function getAvailableModels() {
     }
     //console.log(JSON.stringify(data,null,2));
     const modelList = Object.keys(data.models).map(id => ({
-        id,
-        object: 'model',
-        created: Math.floor(Date.now() / 1000),
-        owned_by: 'google'
-      }));
+      id,
+      object: 'model',
+      created: Math.floor(Date.now() / 1000),
+      owned_by: 'google'
+    }));
     modelList.push({
       id: "claude-opus-4-5",
       object: 'model',
       created: Math.floor(Date.now() / 1000),
       owned_by: 'google'
     })
-    
+
     return {
       object: 'list',
       data: modelList
@@ -328,7 +326,7 @@ export async function getAvailableModels() {
 
 export async function getModelsWithQuotas(token) {
   const headers = buildHeaders(token);
-  
+
   try {
     let data;
     if (useAxios) {
@@ -341,7 +339,7 @@ export async function getModelsWithQuotas(token) {
       }
       data = await response.json();
     }
-    
+
     const quotas = {};
     Object.entries(data.models || {}).forEach(([modelId, modelData]) => {
       if (modelData.quotaInfo) {
@@ -351,7 +349,7 @@ export async function getModelsWithQuotas(token) {
         };
       }
     });
-    
+
     return quotas;
   } catch (error) {
     await handleApiError(error, token, requestBody);
@@ -359,10 +357,10 @@ export async function getModelsWithQuotas(token) {
 }
 
 export async function generateAssistantResponseNoStream(requestBody, token) {
-  
+
   const headers = buildHeaders(token);
   let data;
-  
+
   try {
     if (useAxios) {
       data = (await axios(buildAxiosConfig(config.api.noStreamUrl, headers, requestBody))).data;
@@ -385,14 +383,15 @@ export async function generateAssistantResponseNoStream(requestBody, token) {
   let thinkingSignature = '';
   const toolCalls = [];
   const imageUrls = [];
-  
+
   for (const part of parts) {
-        if (part.thoughtSignature || part.thought_signature) {
-             state.thoughtSignature = part.thoughtSignature || part.thought_signature;
-        }
-        if (part.thought || part.thoughtSignature || part.thought_signature) {
-          log.info(`[THOUGHT DEBUG] thought=${part.thought} sig=${part.thoughtSignature || part.thought_signature} textlen=${(part.text||'').length}`);
-        }
+    if (part.thoughtSignature || part.thought_signature) {
+      thinkingSignature = part.thoughtSignature || part.thought_signature;
+    }
+
+    if (part.thought || part.thoughtSignature || part.thought_signature) {
+      log.info(`[THOUGHT DEBUG] thought=${part.thought} sig=${part.thoughtSignature || part.thought_signature} textlen=${(part.text || '').length}`);
+    }
     if (part.thought === true) {
       thinkingContent += part.text || '';
       if (!thinkingSignature && (part.thoughtSignature || part.thought_signature)) {
@@ -414,43 +413,36 @@ export async function generateAssistantResponseNoStream(requestBody, token) {
       imageUrls.push(imageUrl);
     }
   }
-  
+
   // 拼接思维链标签
   if (thinkingContent) {
     const thinkTag = thinkingSignature ? `<think signature="${thinkingSignature}">` : '<think>';
     content = `${thinkTag}\n${thinkingContent}\n</think>\n${content}`;
   }
-  
-  
-      const rawReason = data.response.candidates[0].finishReason;
-      let mappedReason = null;
-      
-      // Map for Claude and Gemini models
-      if (state.model && (state.model.includes('claude') || state.model.includes('gemini'))) {
-         mappedReason = state.toolCalls.length > 0 ? 'tool_calls' : mapFinishReason(rawReason);
-         callback({ type: 'finish', finishReason: mappedReason });
-      }
-      // 提取 token 使用统计
+
+
+
+  // 提取 token 使用统计
   const usage = data.response?.usageMetadata;
   const usageData = usage ? {
     prompt_tokens: usage.promptTokenCount || 0,
     completion_tokens: usage.candidatesTokenCount || 0,
     total_tokens: usage.totalTokenCount || 0
   } : null;
-  
+
   // 生图模型：转换为 markdown 格式
-  
+
   let finishReason = undefined;
   if (requestBody.model && (requestBody.model.includes('claude') || requestBody.model.includes('gemini'))) {
-      const rawFinishReason = data.response?.candidates?.[0]?.finishReason;
-      finishReason = toolCalls.length > 0 ? 'tool_calls' : mapFinishReason(rawFinishReason);
+    const rawFinishReason = data.response?.candidates?.[0]?.finishReason;
+    finishReason = toolCalls.length > 0 ? 'tool_calls' : mapFinishReason(rawFinishReason);
   }
   if (imageUrls.length > 0) {
     let markdown = content ? content + '\n\n' : '';
     markdown += imageUrls.map(url => `![image](${url})`).join('\n\n');
     return { content: markdown, toolCalls, usage: usageData, finishReason };
   }
-  
+
   return { content, toolCalls, usage: usageData, finishReason };
 }
 
