@@ -1,11 +1,29 @@
 # ADD and FIX  
 
+* You should never expose http port to internet.
+
 添加功能
 * socks5支持
 * log level 调试
 * ccr配置，支持gemini和cluade模型,只测试了思考模型。
 * fix gemini-3-pro-high等模型的小bug
 * src/anti-fixer.js 是ccr需要的插件.
+```json
+  {
+        "name": "anti-ai",
+        "api_base_url": "http://xxx.com:8045/v1/chat/completions",
+        "api_key": "sk-xxx",
+        "models": ["gpt-oss-120b-medium", "gemini-2.5-flash-thinking", "claude-sonnet-4-5", "gemini-3-pro-low", "gemini-3-pro-high","gemini-2.5-flash", "chat_23310", "rev19-uic3-1p", "chat_20706", "gemini-2.5-flash-lite", "gemini-3-pro-image", "claude-sonnet-4-5-thinking", "gemini-2.5-pro", "gemini-2.5-flash-image", "claude-opus-4-5-thinking", "claude-opus-4-5"],
+        "transformer": { "use": ["anti-payload-fixer"] }
+  
+  },
+}
+```
+
+* now structive thinking events now show think text in the conversation history. 
+* fix gemini   
+* fix subtl bug for claude messages.1.content.0.thinking.cache_control: Extra inputs are not permitted 
+
 
 # Antigravity to OpenAI API 代理服务
 
@@ -366,8 +384,7 @@ npm run login
 │   │   ├── logger.js       # 日志模块
 │   │   └── utils.js        # 工具函数
 │   └── AntigravityRequester.js # TLS 指纹请求器封装
-├── test/
-│   ├── test-request.js     # 请求测试
+├── test/│   ├── test-request.js     # 请求测试
 │   └── test-transform.js   # 转换测试
 ├── .env                    # 环境变量配置（敏感信息）
 ├── .env.example            # 环境变量配置示例
