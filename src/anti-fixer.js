@@ -75,40 +75,115 @@ class AntiPayloadFixer {
           }
         }
       });
+    }
 
-      // Strip cache_control from message.content (array of parts) to avoid upstream API rejection
-      newReq.messages.forEach((m, i) => {
-        // Strip from message.thinking directly (OpenAI format)
-        if (m.thinking && m.thinking.cache_control !== undefined) {
-          this.log(`[AntiPayloadFixer] Stripping cache_control from MSG[${i}] message.thinking`);
-          delete m.thinking.cache_control;
+    // ensureSignature helper - defined at top level of method
+    let added = 0;
+    let missingBefore = 0;
+
+    const ensureSignature = (fnObj, sigSeed, forcedSignature, callKey) => {
+      if (!fnObj || typeof fnObj !== "object") return;
+
+      // Debug: log what we're looking for
+      this.log(`[AntiPayloadFixer] ensureSignature called: callKey=${callKey}, cacheSize=${this.signatureCache.size}, latestThinkingSig=${this.latestThinkingSignature ? 'yes' : 'no'}`);
+
+      if (forcedSignature) {
+        fnObj.thought_signature = forcedSignature;
+      } else if (!fnObj.thought_signature) {
+        // Try cache first using per-call key
+        if (callKey && this.signatureCache.has(callKey)) {
+          const entry = this.signatureCache.get(callKey);
+          fnObj.thought_signature = entry.signature;
+          this.log(`[AntiPayloadFixer] Restored cached signature for ${callKey}`);
+          missingBefore += 1;
+          return;
         }
 
-        // Strip from message-level cache_control
-        if (m.cache_control !== undefined) {
-          this.log(`[AntiPayloadFixer] Stripping cache_control from MSG[${i}] message-level`);
-          delete m.cache_control;
+        // Fallback: If no cached signature found but we have latestThinkingSignature,
+        // use it for ALL tool calls that need a signature (after flattening, each message has one tool_call)
+        if (this.latestThinkingSignature) {
+          fnObj.thought_signature = this.latestThinkingSignature;
+          this.log(`[AntiPayloadFixer] Used latestThinkingSignature fallback for: ${callKey}`);
+          added += 1;
+          return;
         }
 
-        if (Array.isArray(m.content)) {
-          m.content.forEach((part, partIdx) => {
-            // Top-level cache_control on content part
-            if (part && part.cache_control !== undefined) {
-              this.log(`[AntiPayloadFixer] Stripping cache_control from MSG[${i}] part[${partIdx}] type=${part.type || 'unknown'}`);
-              delete part.cache_control;
+        // No signature available at all
+        this.log(`[AntiPayloadFixer] No signature found for ${callKey || sigSeed} - no latestThinkingSignature available`);
+      } else {
+        missingBefore += 1;
+      }
+      // Note: Only thought_signature is needed. antigravity2api will read it and
+      // place it at the part level as thoughtSignature for Gemini Native API.
+    };
+
+    // OpenAI-style messages
+    if (Array.isArray(newReq.messages)) {
+      newReq.messages.forEach((msg, msgIdx) => {
+        // For messages with tool_calls, only ensure the FIRST tool_call has a signature
+        // This matches how antigravity2api/utils.js works - it uses firstSignature for all calls
+        if (Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+          const firstTc = msg.tool_calls[0];
+          const callKey = this.generateCallKeyFromToolCall(firstTc);
+          ensureSignature(firstTc.function, `${msgIdx}-0`, null, callKey);
+          // Subsequent tool_calls don't need signatures - utils.js will use firstSignature
+        }
+
+        // legacy function_call
+        if (msg.function_call) {
+          ensureSignature(msg.function_call, `${msgIdx}-fc`);
+        }
+
+        // content parts that may contain functionCall/function_call (Gemini style)
+        if (Array.isArray(msg.content)) {
+          let firstFunctionCallHandled = false;
+          msg.content.forEach((part, partIdx) => {
+            if (part?.functionCall && !firstFunctionCallHandled) {
+              ensureSignature(part.functionCall, `${msgIdx}-${partIdx}-pc`);
+              firstFunctionCallHandled = true;
             }
-            // Nested cache_control inside thinking object (Anthropic format)
-            if (part && part.thinking && part.thinking.cache_control !== undefined) {
-              this.log(`[AntiPayloadFixer] Stripping cache_control from MSG[${i}] part[${partIdx}].thinking`);
-              delete part.thinking.cache_control;
+            if (part?.function_call && !firstFunctionCallHandled) {
+              ensureSignature(part.function_call, `${msgIdx}-${partIdx}-pc`);
+              firstFunctionCallHandled = true;
             }
           });
         }
       });
     }
 
-    // ... (rest of logic) ...
+    // Gemini-style contents
+    if (Array.isArray(newReq.contents)) {
+      newReq.contents.forEach((contentObj, cIdx) => {
+        if (Array.isArray(contentObj.parts)) {
+          contentObj.parts.forEach((part, pIdx) => {
+            if (part?.functionCall) {
+              ensureSignature(part.functionCall, `${cIdx}-${pIdx}-g`);
+            }
+            if (part?.function_call) {
+              ensureSignature(part.function_call, `${cIdx}-${pIdx}-g`);
+            }
+          });
+        }
+      });
+    }
 
+    this.log(
+      "[AntiPayloadFixer] After transformation:",
+      JSON.stringify(newReq, null, 2)
+    );
+    this.log(
+      `[AntiPayloadFixer] thought_signature stats — added: ${added}, pre-existing: ${missingBefore}`
+    );
+    // DEBUG LOGGING START
+    if (newReq.messages && newReq.messages.length > 0) {
+      newReq.messages.forEach((m, i) => {
+        if (m.tool_calls) {
+          m.tool_calls.forEach((tc, j) => {
+            this.log(`[AntiPayloadFixer] OUTGOING MSG[${i}] TOOL_CALL[${j}] id: ${tc.id} thought_signature:`, tc.function?.thought_signature);
+          });
+        }
+      });
+    }
     // DEBUG LOGGING END
     return newReq;
   }
@@ -190,11 +265,14 @@ class AntiPayloadFixer {
             if (parsed.choices?.[0]?.delta?.tool_calls) {
               const toolCalls = parsed.choices[0].delta.tool_calls;
               toolCalls.forEach(tc => {
-                if (tc.function && (tc.function.thought_signature || tc.function.thoughtSignature)) {
-                  const sig = tc.function.thought_signature || tc.function.thoughtSignature;
+                // Use signature from tool_call if present, OR use latestThinkingSignature as fallback
+                // Gemini sends the signature on the THINKING part, not on each functionCall part
+                const sig = tc.function?.thought_signature || tc.function?.thoughtSignature || this.latestThinkingSignature;
+                if (sig) {
                   const callKey = this.generateCallKeyFromStreamCall(tc);
                   if (callKey) {
                     this.signatureCache.set(callKey, { signature: sig, timestamp: Date.now() });
+                    this.log(`[AntiPayloadFixer] CACHED tool_call signature for ${callKey}: ${sig.substring(0, 15)}...`);
                   }
                 }
               });
