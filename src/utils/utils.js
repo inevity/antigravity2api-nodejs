@@ -19,6 +19,43 @@ function simpleHash(str) {
 // Module-level map to track toolCallId -> functionName for matching responses
 const toolCallIdToName = new Map();
 
+// Module-level tracking for model family to detect model switches
+let lastProcessedModelFamily = null;
+
+// SIGNATURE CACHE: Track valid signatures received from Gemini in current session
+// Any signature NOT in this cache is considered stale and should be replaced
+const validSignaturesThisSession = new Set();
+
+// Register a signature as valid (called from client.js when receiving Gemini response)
+function registerValidSignature(signature) {
+  if (signature && signature !== 'skip_thought_signature_validator') {
+    validSignaturesThisSession.add(signature);
+    log.info(`[SIG-CACHE] Registered valid signature: ${signature.substring(0, 20)}... (cache size: ${validSignaturesThisSession.size})`);
+  }
+}
+
+// Check if a signature is valid for this session
+function isSignatureValid(signature) {
+  if (!signature) {
+    log.info(`[SIG-VALID-CHECK] sig is falsy, returning false`);
+    return false;
+  }
+  if (signature === 'skip_thought_signature_validator') {
+    log.info(`[SIG-VALID-CHECK] sig is skip, returning true`);
+    return true;
+  }
+  const result = validSignaturesThisSession.has(signature);
+  log.info(`[SIG-VALID-CHECK] sig=${signature.substring(0, 15)}... inCache=${result}`);
+  return result;
+}
+
+function getModelFamily(model) {
+  if (!model) return 'unknown';
+  if (model.includes('claude')) return 'claude';
+  if (model.includes('gemini')) return 'gemini';
+  return 'other';
+}
+
 async function extractImagesFromContent(content, modelName) {
   const result = { text: '', images: [] };
 
@@ -303,6 +340,177 @@ async function openaiMessageToAntigravity(openaiMessages, modelName) {
   let systemText = "";
   const extractSystem = modelName && modelName.includes('claude');
 
+  // DEBUG: Log incoming assistant messages to see their structure
+  openaiMessages.forEach((msg, i) => {
+    if (msg.role === 'assistant') {
+      log.info(`[INCOMING-DEBUG] MSG[${i}] thinking=${!!msg.thinking} tool_calls=${msg.tool_calls?.length || 0}`);
+      if (msg.tool_calls) {
+        msg.tool_calls.forEach((tc, j) => {
+          log.info(`[INCOMING-DEBUG] MSG[${i}] TC[${j}] thought_signature=${tc.function?.thought_signature ? 'present' : 'missing'}`);
+        });
+      }
+    }
+  });
+
+  // MODEL SWITCH DETECTION: Handle different model requirements
+  // Signatures are cryptographically bound to the model that generated them
+  const currentFamily = getModelFamily(modelName);
+
+  const isModelSwitch = lastProcessedModelFamily && lastProcessedModelFamily !== currentFamily;
+  const isSwitchingToClaude = isModelSwitch && lastProcessedModelFamily === 'gemini' && currentFamily === 'claude';
+
+  // Also detect cold start to Claude with Gemini history
+  // Check if current model is Claude and there are thinking blocks in history that are NOT in cache
+  const isColdStartToClaude = !lastProcessedModelFamily && currentFamily === 'claude';
+
+  // Check for stale Gemini thinking: thinking that has signature NOT in our cache
+  const hasStaleGeminiThinking = openaiMessages.some(msg => {
+    if (msg.role !== 'assistant') return false;
+    if (msg.thinking && msg.thinking.signature) {
+      const sig = msg.thinking.signature;
+      return !validSignaturesThisSession.has(sig) && sig !== 'skip_thought_signature_validator';
+    }
+    if (msg.tool_calls) {
+      return msg.tool_calls.some(tc => {
+        const sig = tc.function?.thought_signature;
+        return sig && !validSignaturesThisSession.has(sig) && sig !== 'skip_thought_signature_validator';
+      });
+    }
+    return false;
+  });
+
+  // CRITICAL: Only strip when there's actually stale Gemini thinking (not in cache)
+  const shouldStripForClaude = currentFamily === 'claude' && hasStaleGeminiThinking;
+
+  log.info(`[STRIP-DEBUG] coldStart=${isColdStartToClaude}, hasStale=${hasStaleGeminiThinking}, shouldStrip=${shouldStripForClaude}, cacheSize=${validSignaturesThisSession.size}`);
+
+  if (isModelSwitch) {
+    log.info(`[MODEL-SWITCH] ${lastProcessedModelFamily} → ${currentFamily}, clearing signature cache`);
+    validSignaturesThisSession.clear(); // Clear cache on model switch
+  }
+
+  // CRITICAL: For Claude, remove stale Gemini thinking (not in cache)
+  // Keep new thinking from current Claude session (in cache)
+  if (shouldStripForClaude) {
+    log.info(`[STRIP-FOR-CLAUDE] Processing thinking blocks (switch=${isSwitchingToClaude})`);
+    openaiMessages.forEach((msg, i) => {
+      if (msg.role !== 'assistant') return;
+
+      // 1. Check thinking signature - delete if stale, keep if valid
+      if (msg.thinking) {
+        const sig = msg.thinking.signature;
+        const isValid = sig && (validSignaturesThisSession.has(sig) || sig === 'skip_thought_signature_validator');
+        if (!isValid) {
+          log.info(`[STRIP-THINK] MSG[${i}] Removing stale Gemini thinking (sig=${sig ? sig.substring(0, 15) + '...' : 'none'})`);
+          delete msg.thinking;  // Remove stale thinking
+        } else {
+          log.info(`[KEEP-THINK] MSG[${i}] Keeping valid session thinking`);
+        }
+      }
+
+      // 2. Check tool_calls signature - delete if stale, keep if valid
+      if (msg.tool_calls) {
+        msg.tool_calls.forEach((tc, tcIdx) => {
+          if (tc.function && tc.function.thought_signature) {
+            const sig = tc.function.thought_signature;
+            const isValid = validSignaturesThisSession.has(sig) || sig === 'skip_thought_signature_validator';
+            if (!isValid) {
+              log.info(`[STRIP-SIG] MSG[${i}] TC[${tcIdx}] Removing stale thought_signature`);
+              delete tc.function.thought_signature;
+            } else {
+              log.info(`[KEEP-SIG] MSG[${i}] TC[${tcIdx}] Keeping valid thought_signature`);
+            }
+          }
+        });
+      }
+
+      // 3. Strip <think> blocks from string content if they have stale signatures
+      if (typeof msg.content === 'string' && msg.content.includes('<think')) {
+        const sigMatch = msg.content.match(/signature="([^"]*)"/);
+        const sig = sigMatch ? sigMatch[1] : null;
+        const isValid = sig && (validSignaturesThisSession.has(sig) || sig === 'skip_thought_signature_validator');
+        if (!isValid) {
+          msg.content = msg.content.replace(/<think[^>]*>[\s\S]*?<\/think[^>]*>/g, '').trim();
+          log.info(`[STRIP-THINK] MSG[${i}] Removed stale <think> from content`);
+        }
+      }
+    });
+  }
+
+  log.info(`[SESSION-DEBUG] lastFam=${lastProcessedModelFamily}, currentFam=${currentFamily}, sigCacheSize=${validSignaturesThisSession.size}`);
+
+  // SIGNATURE VALIDATION using cache
+  // Replace each signature that is NOT in our cache (stale from previous session)
+  // Valid signatures from current session are kept as-is
+  openaiMessages.forEach((msg, i) => {
+    if (msg.role !== 'assistant') return;
+
+    // Handle structured thinking - check cache for valid signatures
+    if (msg.thinking) {
+      const sig = msg.thinking.signature;
+      log.info(`[SIG-DEBUG] MSG[${i}] msg.thinking exists, sig=${sig ? sig.substring(0, 15) + '...' : 'undefined'}`);
+
+      // Determine if signature is valid (skip value OR in current session cache)
+      const isSkip = sig === 'skip_thought_signature_validator';
+      const isInCache = sig && validSignaturesThisSession.has(sig);
+
+      if (!sig) {
+        // Missing - add skip
+        log.info(`[SIG-ADD-THINK] MSG[${i}] thinking.signature missing, adding skip`);
+        msg.thinking.signature = "skip_thought_signature_validator";
+      } else if (isSkip || isInCache) {
+        // Valid - keep it
+        log.info(`[SIG-KEEP-THINK] MSG[${i}] thinking.signature valid (skip=${isSkip}, inCache=${isInCache})`);
+      } else {
+        // Stale - replace with skip
+        log.info(`[SIG-REPLACE-THINK] MSG[${i}] thinking.signature stale, replacing with skip`);
+        msg.thinking.signature = "skip_thought_signature_validator";
+      }
+    }
+
+    // Handle tool_calls signatures - BOTH stale AND missing
+    if (msg.tool_calls) {
+      msg.tool_calls.forEach((tc, tcIdx) => {
+        if (tc.function) {
+          const sig = tc.function.thought_signature;
+          if (!sig) {
+            // Signature is completely MISSING - add skip placeholder
+            log.info(`[SIG-ADD] MSG[${i}] TC[${tcIdx}] signature is missing, adding skip`);
+            tc.function.thought_signature = "skip_thought_signature_validator";
+          } else if (!isSignatureValid(sig)) {
+            // Signature exists but is stale - replace with skip
+            log.info(`[SIG-REPLACE] MSG[${i}] TC[${tcIdx}] signature is stale, replacing`);
+            tc.function.thought_signature = "skip_thought_signature_validator";
+          } else {
+            log.info(`[SIG-KEEP] MSG[${i}] TC[${tcIdx}] sig=${sig.substring(0, 15)}... (valid)`);
+          }
+        }
+      });
+    }
+
+    // Handle string content with <think> tags
+    if (typeof msg.content === 'string' && msg.content.includes('<think')) {
+      const sigMatch = msg.content.match(/signature="([^"]*)"/);
+      if (sigMatch && sigMatch[1] && !isSignatureValid(sigMatch[1])) {
+        log.info(`[SIG-REPLACE] MSG[${i}] string content signature is stale, replacing`);
+        msg.content = msg.content.replace(/signature="[^"]*"/gi, 'signature="skip_thought_signature_validator"');
+      }
+    }
+
+    // Handle array content
+    if (Array.isArray(msg.content)) {
+      msg.content.forEach((part, pIdx) => {
+        if ((part.type === 'thinking' || part.thinking === true) && part.signature) {
+          if (!isSignatureValid(part.signature)) {
+            log.info(`[SIG-REPLACE] MSG[${i}] arr[${pIdx}] signature is stale, replacing`);
+            part.signature = "skip_thought_signature_validator";
+          }
+        }
+      });
+    }
+  });
+  lastProcessedModelFamily = currentFamily;
+
   // PREPROCESSING: Strip thinking blocks from assistant messages when followed by non-tool user messages
   // Per Anthropic's rules: "Cache gets invalidated when non-tool-result user content is added, 
   // causing all previous thinking blocks to be stripped"
@@ -481,5 +689,6 @@ function getDefaultIp() {
 export {
   generateRequestId,
   generateRequestBody,
-  getDefaultIp
+  getDefaultIp,
+  registerValidSignature
 }

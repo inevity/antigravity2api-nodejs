@@ -2,6 +2,7 @@ import axios from 'axios';
 import tokenManager from '../auth/token_manager.js';
 import config from '../config/config.js';
 import { generateToolCallId } from '../utils/idGenerator.js';
+import { registerValidSignature } from '../utils/utils.js';
 import AntigravityRequester from '../AntigravityRequester.js';
 import { saveBase64Image } from '../utils/imageStorage.js';
 import { buildAxiosProxyOptions } from '../utils/proxy.js';
@@ -189,6 +190,8 @@ function parseAndEmitStreamChunk(line, state, callback) {
       for (const part of parts) {
         if (part.thoughtSignature || part.thought_signature) {
           state.thoughtSignature = part.thoughtSignature || part.thought_signature;
+          // Register this signature as valid for current session
+          registerValidSignature(state.thoughtSignature);
         }
 
         if (part.thought || part.thoughtSignature || part.thought_signature) {
@@ -416,6 +419,8 @@ export async function generateAssistantResponseNoStream(requestBody, token) {
   for (const part of parts) {
     if (part.thoughtSignature || part.thought_signature) {
       thinkingSignature = part.thoughtSignature || part.thought_signature;
+      // Register this signature as valid for current session
+      registerValidSignature(thinkingSignature);
     }
 
     if (part.thought || part.thoughtSignature || part.thought_signature) {
