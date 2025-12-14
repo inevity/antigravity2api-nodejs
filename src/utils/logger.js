@@ -9,16 +9,17 @@ const colors = {
 
 // Log level: 'debug' | 'info' | 'warn' | 'error'
 const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
-const LEVELS = { debug: 0, info: 1, warn: 2, error: 3 };
+const LEVELS = { trace: -1, debug: 0, info: 1, warn: 2, error: 3 };
 
 function shouldLog(level) {
-  return LEVELS[level] >= LEVELS[LOG_LEVEL];
+  const currentLevelVal = LEVELS[LOG_LEVEL] !== undefined ? LEVELS[LOG_LEVEL] : LEVELS['info'];
+  return LEVELS[level] >= currentLevelVal;
 }
 
 function logMessage(level, ...args) {
   if (!shouldLog(level)) return;
   const timestamp = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-  const color = { debug: colors.gray, info: colors.green, warn: colors.yellow, error: colors.red }[level];
+  const color = { trace: colors.gray, debug: colors.cyan, info: colors.green, warn: colors.yellow, error: colors.red }[level] || colors.reset;
   console.log(`${colors.gray}${timestamp}${colors.reset} ${color}[${level}]${colors.reset}`, ...args);
 }
 
@@ -29,6 +30,7 @@ function logRequest(method, path, status, duration) {
 }
 
 export const log = {
+  trace: (...args) => logMessage('trace', ...args),
   debug: (...args) => logMessage('debug', ...args),
   info: (...args) => logMessage('info', ...args),
   warn: (...args) => logMessage('warn', ...args),

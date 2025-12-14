@@ -3,6 +3,7 @@
 * You should never expose http port to internet.
 
 添加功能
+* manual switch think model(gemini/claue) by CCR while keeping  cladue conversation history 
 * socks5支持
 * log level 调试
 * ccr配置，支持gemini和cluade模型,只测试了思考模型。

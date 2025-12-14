@@ -41,6 +41,17 @@ class AntiPayloadFixer {
     // Defensive copy so we don't mutate upstream payloads.
     const newReq = JSON.parse(JSON.stringify(request || {}));
 
+    // Check if this is Claude model with thinking enabled (for thinking block restoration)
+    const modelName = newReq.model || '';
+    const isClaudeThinking = modelName.includes('claude') &&
+      (modelName.includes('thinking') || modelName.includes('opus') || modelName.includes('sonnet'));
+
+    // Check if this is ANY thinking model (for signature fallback - applies to both Claude and Gemini)
+    const isThinkingModel = isClaudeThinking ||
+      modelName.includes('gemini-2.5') ||
+      modelName.includes('gemini-3') ||
+      modelName.endsWith('-thinking');
+
     // [DEBUG] Inspect incoming messages for <think> tags
     if (newReq.messages) {
       newReq.messages.forEach((m, i) => {
@@ -57,19 +68,16 @@ class AntiPayloadFixer {
           } else {
             this.log(`[AntiPayloadFixer] [FROM CLIENT] NO <think> tag in MSG[${i}]. Content Start: ${contentStr.substring(0, 50)}...`);
 
-            // Check if we should restore thinking block using cached signature
-            // Condition: Role is assistant, has tool calls (checked later but we can infer), and NO <think> tag.
-            // Simplified: If it's assistant and we have a cached thinking signature, and content is plain text.
-            if (m.role === 'assistant' && this.latestThinkingSignature && typeof m.content === 'string' && m.content.trim().length > 0) {
-              // We assume this plain text is the stripped thought.
-              // Verify strictly that we have tool calls in this message to be sure?
-              // The flattened logic later handles splitting.
-              // Let's check `m.tool_calls` exist.
+            // FALLBACK 1: Restore thinking block for Claude with thinking enabled
+            // Claude requires: "assistant message must start with a thinking block before tool_use"
+            // See: https://docs.claude.com/en/docs/build-with-claude/extended-thinking
+            // Only for Claude (Gemini doesn't have this structural requirement)
+            if (isClaudeThinking && m.role === 'assistant' && typeof m.content === 'string' && m.content.trim().length > 0) {
               if (m.tool_calls && m.tool_calls.length > 0) {
-                this.log(`[AntiPayloadFixer] RESTORING thinking block from cache for MSG[${i}]`);
-                m.content = `<think>${m.content}\n<!-- signature="${this.latestThinkingSignature}" --></think>`;
-                // Assuming 'added' was a local variable, it's removed as per the snippet.
-                // added += 1;
+                // Use cached signature if available, otherwise use skip validator
+                const signatureToUse = this.latestThinkingSignature || 'skip_thought_signature_validator';
+                this.log(`[AntiPayloadFixer] RESTORING thinking block for MSG[${i}] with signature: ${signatureToUse.substring(0, 20)}...`);
+                m.content = `<think>${m.content}\n<!-- signature="${signatureToUse}" --></think>`;
               }
             }
           }
@@ -108,8 +116,17 @@ class AntiPayloadFixer {
           return;
         }
 
-        // No signature available at all
-        this.log(`[AntiPayloadFixer] No signature found for ${callKey || sigSeed} - no latestThinkingSignature available`);
+        // FALLBACK 2: Use skip_thought_signature_validator for cold start or when no signature available
+        // Per Google docs: "Gemini 3 Pro must pass back thought signatures during function calling"
+        // See: https://ai.google.dev/gemini-api/docs/thought-signatures
+        // Applies to BOTH Claude and Gemini thinking models
+        if (isThinkingModel) {
+          fnObj.thought_signature = 'skip_thought_signature_validator';
+          this.log(`[AntiPayloadFixer] No cached signature, using skip_thought_signature_validator for: ${callKey || sigSeed}`);
+          added += 1;
+        } else {
+          this.log(`[AntiPayloadFixer] No signature needed for non-thinking model: ${callKey || sigSeed}`);
+        }
       } else {
         missingBefore += 1;
       }
@@ -211,6 +228,12 @@ class AntiPayloadFixer {
         chunkCount++;
         chunks.push(value);
         this.log('[AntiPayloadFixer] Read chunk', chunkCount, 'size:', value?.length);
+
+        // Log first chunk content for debugging (up to 250 bytes)
+        if (chunkCount === 1 && value) {
+          const firstChunkText = new TextDecoder().decode(value).substring(0, 250);
+          this.log('[AntiPayloadFixer] First chunk content:', firstChunkText);
+        }
 
         // Also capture signatures from tool calls
         this.processChunkForSignatures(value);

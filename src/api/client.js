@@ -183,7 +183,7 @@ function parseAndEmitStreamChunk(line, state, callback) {
 
   try {
     const data = JSON.parse(line.slice(6));
-    log.debug('[LLM_RESPONSE] ' + JSON.stringify(data));
+    log.trace('[LLM_RESPONSE] ' + JSON.stringify(data));
     const parts = data.response?.candidates?.[0]?.content?.parts;
 
     if (parts) {
